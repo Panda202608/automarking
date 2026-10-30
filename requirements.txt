@@ -1,3 +1,6 @@
 streamlit
 pandas
 openpyxl
+opencv-python-headless
+numpy
+Pillow
