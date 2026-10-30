@@ -408,4 +408,114 @@ elif mode == "教員用（正解・配点・特殊ルール設定）":
                 _, extracted_answers, _ = analyze_mark_sheet(ans_file)
                 save_json_file(ANSWER_KEY_FILE, extracted_answers)
                 st.success("画像から正解データを登録しました！")
-                st.
+                st.rerun()
+        else:
+            current_answers = load_answer_key()
+            options = [1, 2, 3, 4, 5, 6, 7, 8, 9]
+            new_answers = {}
+            col_a_l, col_a_r = st.columns(2)
+            with col_a_l:
+                for i in range(1, 26):
+                    q_k = f'Q{i}'
+                    idx = options.index(current_answers.get(q_k, 1)) if current_answers.get(q_k, 1) in options else 0
+                    c1, c2 = st.columns([1, 2])
+                    c1.write(f"**問 {i}**")
+                    new_answers[q_k] = c2.selectbox(f"問{i}", options=options, index=idx, key=f"ans_{q_k}", label_visibility="collapsed")
+            with col_a_r:
+                for i in range(26, 51):
+                    q_k = f'Q{i}'
+                    idx = options.index(current_answers.get(q_k, 1)) if current_answers.get(q_k, 1) in options else 0
+                    c1, c2 = st.columns([1, 2])
+                    c1.write(f"**問 {i}**")
+                    new_answers[q_k] = c2.selectbox(f"問{i}", options=options, index=idx, key=f"ans_{q_k}", label_visibility="collapsed")
+            if st.button("手入力した正解データを保存", type="primary"):
+                save_json_file(ANSWER_KEY_FILE, new_answers)
+                st.success("正解データを保存しました！")
+                st.rerun()
+
+    with tab2:
+        current_points = load_points_key()
+        col_b1, col_b2 = st.columns([2, 1])
+        bulk_val = col_b1.number_input("全問の配点を一括変更（点）", min_value=0.5, max_value=20.0, value=2.0, step=0.5)
+        if col_b2.button("全問一括適用"):
+            save_json_file(POINTS_KEY_FILE, {f'Q{i}': bulk_val for i in range(1, 51)})
+            st.success(f"全問の配点を {bulk_val} 点に変更しました！")
+            st.rerun()
+
+        st.markdown("---")
+        col_p_l, col_p_r = st.columns(2)
+        new_points = {}
+        with col_p_l:
+            for i in range(1, 26):
+                q_k = f'Q{i}'
+                new_points[q_k] = st.number_input(f"問 {i} の配点", min_value=0.0, max_value=20.0, value=float(current_points.get(q_k, 2.0)), step=0.5, key=f"p_{q_k}")
+        with col_p_r:
+            for i in range(26, 51):
+                q_k = f'Q{i}'
+                new_points[q_k] = st.number_input(f"問 {i} の配点", min_value=0.0, max_value=20.0, value=float(current_points.get(q_k, 2.0)), step=0.5, key=f"p_{q_k}")
+        if st.button("個別配点設定を保存", type="primary"):
+            save_json_file(POINTS_KEY_FILE, new_points)
+            st.success("配点設定を保存しました！")
+
+    with tab3:
+        st.subheader("■ 特殊配点ルールの設定")
+        special_rules = load_special_rules()
+        col_u1, col_u2, col_u3 = st.columns([2, 2, 1])
+        unorder_qs = col_u1.multiselect("対象の問題を選択", [f'Q{i}' for i in range(1, 51)], key="sel_unorder_qs")
+        unorder_ans = col_u2.multiselect("正解となる数字の組み合わせ", [1, 2, 3, 4, 5, 6, 7, 8, 9], key="sel_unorder_ans")
+        unorder_pt = col_u3.number_input("各問の配点", value=2.0, step=0.5, key="unorder_pt")
+        
+        if st.button("＋ 順不同グループを追加"):
+            if len(unorder_qs) >= 2 and len(unorder_qs) == len(unorder_ans):
+                special_rules["unordered"].append({"questions": unorder_qs, "answers": unorder_ans, "point_per_q": unorder_pt})
+                save_json_file(RULES_KEY_FILE, special_rules)
+                st.success("順不同ルールを追加しました！")
+                st.rerun()
+
+        st.markdown("---")
+        col_c1, col_c2 = st.columns([3, 1])
+        all_correct_qs = col_c1.multiselect("完答対象の問題を選択", [f'Q{i}' for i in range(1, 51)], key="sel_ac_qs")
+        group_pt = col_c2.number_input("完答時の合計配点", value=4.0, step=0.5, key="ac_pt")
+        
+        if st.button("＋ 完答グループを追加"):
+            if len(all_correct_qs) >= 2:
+                special_rules["all_correct"].append({"questions": all_correct_qs, "group_point": group_pt})
+                save_json_file(RULES_KEY_FILE, special_rules)
+                st.success("完答ルールを追加しました！")
+                st.rerun()
+
+        st.markdown("---")
+        st.write("**【現在登録されている特殊ルール】**")
+        st.json(special_rules)
+        if st.button("特殊ルールをすべてクリア（初期化）"):
+            save_json_file(RULES_KEY_FILE, {"unordered": [], "all_correct": []})
+            st.success("特殊ルールをクリアしました。")
+            st.rerun()
+
+elif mode == "教員用（集計・Excel出力）":
+    st.header("■ 教員用 集計ダッシュボード")
+    if os.path.exists(DATA_FILE):
+        df = pd.read_csv(DATA_FILE, encoding='utf-8-sig')
+        st.subheader("1. 個人別結果")
+        st.dataframe(df)
+        
+        st.subheader("2. クラス別・問題別正答率 (%)")
+        answer_key = load_answer_key()
+        q_cols = list(answer_key.keys())
+        correct_cols = [f'{q}_正誤' for q in q_cols if f'{q}_正誤' in df.columns]
+        
+        if correct_cols:
+            class_summary = df.groupby('クラス')[correct_cols].mean() * 100
+            class_summary.columns = [col.replace('_正誤', '') for col in correct_cols]
+            st.dataframe(class_summary.style.format("{:.1f}%"))
+        
+        excel_path = "共通テスト集計結果.xlsx"
+        with pd.ExcelWriter(excel_path, engine='openpyxl') as writer:
+            df.to_excel(writer, sheet_name='個人別結果', index=False)
+            if correct_cols:
+                class_summary.to_excel(writer, sheet_name='クラス別正答率')
+            
+        with open(excel_path, "rb") as f:
+            st.download_button("📥 Excel形式でダウンロード", f, file_name="共通テスト集計結果.xlsx")
+    else:
+        st.warning("まだ提出データがありません。")
