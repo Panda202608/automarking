@@ -29,7 +29,6 @@ def save_json_file(filepath, data):
     with open(filepath, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=4)
 
-# 1〜50問に対応した初期データ
 def load_answer_key():
     return load_json_file(ANSWER_KEY_FILE, {f'Q{i}': 1 for i in range(1, 51)})
 
@@ -44,16 +43,9 @@ def load_special_rules():
     return load_json_file(RULES_KEY_FILE, default_rules)
 
 # ---------------------------------------------------------
-# OpenCV によるマークシート自動解析関数（50問・選択肢1〜9対応）
+# OpenCV によるマークシート自動解析関数（デバッグ描画付き）
 # ---------------------------------------------------------
 def analyze_mark_sheet(image_file):
-    """
-    アップロードされたマークシート画像を読み込み、
-    1. 外枠検出 ＆ 歪み補正（透視変換）
-    2. 受験番号の解析
-    3. 解答欄（問1〜50）の解析
-    を行います。
-    """
     file_bytes = np.asarray(bytearray(image_file.read()), dtype=np.uint8)
     image = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
     image_file.seek(0)
@@ -64,11 +56,12 @@ def analyze_mark_sheet(image_file):
         blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 11, 2
     )
 
-    # 外枠（輪郭）の検出と補正 (800x1100 px にリサイズ)
+    # 1. 外枠検出と補正 (800x1100 px)
     contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     contours = sorted(contours, key=cv2.contourArea, reverse=True)
 
     warp_w, warp_h = 800, 1100
+    warped_color = None
     warped_gray = None
 
     for c in contours:
@@ -92,28 +85,30 @@ def analyze_mark_sheet(image_file):
             ], dtype="float32")
 
             M = cv2.getPerspectiveTransform(rect, dst)
+            warped_color = cv2.warpPerspective(image, M, (warp_w, warp_h))
             warped_gray = cv2.warpPerspective(gray, M, (warp_w, warp_h))
             break
 
     if warped_gray is None:
+        warped_color = cv2.resize(image, (warp_w, warp_h))
         warped_gray = cv2.resize(gray, (warp_w, warp_h))
 
     _, binary_sheet = cv2.threshold(warped_gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
 
-    # 受験番号の解析（初期値）
+    # デバッグ描画用画像
+    debug_img = warped_color.copy()
+
     recognized_exam_id = "1205"
-
-    # 解答欄の解析（問1〜25: 左列 / 問26〜50: 右列）
     recognized_answers = {}
-    options_count = 9 # 選択肢 1〜9
+    options_count = 9
 
-    left_col_x_start, left_col_x_end = 120, 380
-    right_col_x_start, right_col_x_end = 520, 780
-    
-    row_y_start = 320
-    row_height = 28
+    # 解答欄領域の設定（800x1100基準）
+    left_col_x_start, left_col_x_end = 130, 390
+    right_col_x_start, right_col_x_end = 510, 770
+    row_y_start = 220
+    row_height = 32
 
-    # 左列 (Q1 〜 Q25)
+    # 左列 (Q1 〜 Q25) の読み取り
     for i in range(25):
         q_num = i + 1
         q_key = f'Q{q_num}'
@@ -122,6 +117,7 @@ def analyze_mark_sheet(image_file):
         
         best_opt = "未マーク/無効"
         max_pixels = 0
+        best_box = None
         
         for opt in range(1, options_count + 1):
             x1 = int(left_col_x_start + (opt - 1) * ((left_col_x_end - left_col_x_start) / options_count))
@@ -130,13 +126,20 @@ def analyze_mark_sheet(image_file):
             roi = binary_sheet[y1:y2, x1:x2]
             count = cv2.countNonZero(roi)
             
-            if count > max_pixels and count > 80:
+            # デバッグ用の赤枠を描画
+            cv2.rectangle(debug_img, (x1, y1), (x2, y2), (0, 0, 255), 1)
+            
+            if count > max_pixels and count > 60:
                 max_pixels = count
                 best_opt = opt
+                best_box = (x1, y1, x2, y2)
                 
         recognized_answers[q_key] = best_opt
+        if best_box:
+            # 認識した位置を緑色の塗りつぶし枠で強調
+            cv2.rectangle(debug_img, (best_box[0], best_box[1]), (best_box[2], best_box[3]), (0, 255, 0), -1)
 
-    # 右列 (Q26 〜 Q50)
+    # 右列 (Q26 〜 Q50) の読み取り
     for i in range(25):
         q_num = i + 26
         q_key = f'Q{q_num}'
@@ -145,6 +148,7 @@ def analyze_mark_sheet(image_file):
         
         best_opt = "未マーク/無効"
         max_pixels = 0
+        best_box = None
         
         for opt in range(1, options_count + 1):
             x1 = int(right_col_x_start + (opt - 1) * ((right_col_x_end - right_col_x_start) / options_count))
@@ -153,13 +157,22 @@ def analyze_mark_sheet(image_file):
             roi = binary_sheet[y1:y2, x1:x2]
             count = cv2.countNonZero(roi)
             
-            if count > max_pixels and count > 80:
+            # デバッグ用の赤枠を描画
+            cv2.rectangle(debug_img, (x1, y1), (x2, y2), (0, 0, 255), 1)
+            
+            if count > max_pixels and count > 60:
                 max_pixels = count
                 best_opt = opt
+                best_box = (x1, y1, x2, y2)
                 
         recognized_answers[q_key] = best_opt
+        if best_box:
+            cv2.rectangle(debug_img, (best_box[0], best_box[1]), (best_box[2], best_box[3]), (0, 255, 0), -1)
 
-    return recognized_exam_id, recognized_answers
+    # OpenCV (BGR) から RGB へ変換
+    debug_img_rgb = cv2.cvtColor(debug_img, cv2.COLOR_BGR2RGB)
+    
+    return recognized_exam_id, recognized_answers, debug_img_rgb
 
 # セッション状態の初期化
 if "step" not in st.session_state:
@@ -173,7 +186,7 @@ mode = st.sidebar.radio("モード選択", [
 ])
 
 # ---------------------------------------------------------
-# 1. 生徒用：確認画面付き採点フロー（問1〜50対応）
+# 1. 生徒用：確認画面付き採点フロー
 # ---------------------------------------------------------
 if mode == "生徒用（マーク撮影・採点）":
     st.header("■ 生徒用 マークシート送信・採点")
@@ -189,18 +202,22 @@ if mode == "生徒用（マーク撮影・採点）":
             st.image(uploaded_file, caption="撮影画像", width=350)
             if st.button("画像を解析して確認画面へ進む", type="primary"):
                 with st.spinner("マークを自動読み取り中..."):
-                    exam_id, answers = analyze_mark_sheet(uploaded_file)
+                    exam_id, answers, debug_img = analyze_mark_sheet(uploaded_file)
                     st.session_state.uploaded_image = uploaded_file
                     st.session_state.recognized_exam_id = exam_id
                     st.session_state.recognized_answers = answers
+                    st.session_state.debug_image = debug_img
                     st.session_state.step = 2
                     st.rerun()
 
     elif st.session_state.step == 2:
         st.subheader("STEP 2: 読み取り結果の確認・修正")
-        st.success("📄 **手元の解答用紙**を見ながら、以下のマーク内容と一致しているか確認してください。")
-        st.caption("※認識結果が間違っている箇所だけ、ドロップダウンを変更してください。")
+        st.info("💡 下の**「AI解析位置（デバッグ表示）」**で、赤い枠が実際のマーク位置と重なっているか確認してください。")
         
+        # デバッグ画像の表示（アコーディオン）
+        with st.expander("🔍 AI解析位置の可視化（デバッグ画像）を表示する", expanded=True):
+            st.image(st.session_state.debug_image, caption="赤枠：判定領域 / 緑色：マーク検出位置", use_container_width=True)
+
         col_info1, col_info2 = st.columns(2)
         with col_info1:
             student_class = st.selectbox("クラス", ["1-A", "1-B", "1-C", "2-A", "2-B", "3-A", "3-B"], index=0)
@@ -278,7 +295,6 @@ if mode == "生徒用（マーク撮影・採点）":
             '出席番号': student_id
         }
 
-        # 1. 順不同ルールの計算
         for rule in special_rules.get("unordered", []):
             qs = rule["questions"]
             target_ans = set(rule["answers"])
@@ -301,7 +317,6 @@ if mode == "生徒用（マーク撮影・採点）":
                 row_data[q] = user_ans.get(q)
                 row_data[f'{q}_正誤'] = 1 if is_correct else 0
 
-        # 2. 完答ルールの計算
         for rule in special_rules.get("all_correct", []):
             qs = rule["questions"]
             is_all_correct = all([user_ans.get(q) == answer_key.get(q) for q in qs])
@@ -323,7 +338,6 @@ if mode == "生徒用（マーク撮影・採点）":
                 row_data[q] = user_ans.get(q)
                 row_data[f'{q}_正誤'] = 1 if is_all_correct else 0
 
-        # 3. 通常採点
         for q, correct_ans in answer_key.items():
             if q in processed_qs:
                 continue
@@ -375,11 +389,10 @@ if mode == "生徒用（マーク撮影・採点）":
             st.rerun()
 
 # ---------------------------------------------------------
-# 2. 教員用：正解・配点・特殊ルール設定画面
+# 2. 教員用設定画面
 # ---------------------------------------------------------
 elif mode == "教員用（正解・配点・特殊ルール設定）":
     st.header("■ 教員用 各種設定ダッシュボード")
-    
     tab1, tab2, tab3 = st.tabs(["1. 正解データ設定", "2. 基本配点設定", "3. 特殊ルール設定（順不同・完答）"])
     
     with tab1:
@@ -387,7 +400,7 @@ elif mode == "教員用（正解・配点・特殊ルール設定）":
         if input_method == "📷 マークシート画像から自動読み取り":
             ans_file = st.file_uploader("正解マークシート画像をアップロード", type=["jpg", "jpeg", "png"])
             if ans_file and st.button("正解データとして登録", type="primary"):
-                _, extracted_answers = analyze_mark_sheet(ans_file)
+                _, extracted_answers, _ = analyze_mark_sheet(ans_file)
                 save_json_file(ANSWER_KEY_FILE, extracted_answers)
                 st.success("画像から正解データを登録しました！")
                 st.rerun()
@@ -444,8 +457,6 @@ elif mode == "教員用（正解・配点・特殊ルール設定）":
         special_rules = load_special_rules()
         
         st.markdown("#### 🔄 順不同グループの設定")
-        st.caption("例: 問1と問2の正解が「2」と「5」であり、順不同で正解とする場合")
-        
         col_u1, col_u2, col_u3 = st.columns([2, 2, 1])
         unorder_qs = col_u1.multiselect("対象の問題を選択", [f'Q{i}' for i in range(1, 51)], key="sel_unorder_qs")
         unorder_ans = col_u2.multiselect("正解となる数字の組み合わせ", [1, 2, 3, 4, 5, 6, 7, 8, 9], key="sel_unorder_ans")
@@ -462,12 +473,10 @@ elif mode == "教員用（正解・配点・特殊ルール設定）":
                 st.success("順不同ルールを追加しました！")
                 st.rerun()
             else:
-                st.error("問題数と正解数字の個数を一致させてください（2個以上）。")
+                st.error("問題数と正解数字の個数を一致させてください。")
 
         st.markdown("---")
         st.markdown("#### 🎯 完答グループの設定")
-        st.caption("例: 問3と問4の両方が合っている場合のみグループ配点（例: 4点）を与える場合")
-        
         col_c1, col_c2 = st.columns([3, 1])
         all_correct_qs = col_c1.multiselect("完答対象の問題を選択", [f'Q{i}' for i in range(1, 51)], key="sel_ac_qs")
         group_pt = col_c2.number_input("完答時の合計配点", value=4.0, step=0.5, key="ac_pt")
@@ -493,14 +502,13 @@ elif mode == "教員用（正解・配点・特殊ルール設定）":
             st.rerun()
 
 # ---------------------------------------------------------
-# 3. 教員用：集計ダッシュボード
+# 3. 教員用集計画面
 # ---------------------------------------------------------
 elif mode == "教員用（集計・Excel出力）":
     st.header("■ 教員用 集計ダッシュボード")
     if os.path.exists(DATA_FILE):
         df = pd.read_csv(DATA_FILE, encoding='utf-8-sig')
-        
-        st.subheader("1. 個人別結果（クラス・番号表示）")
+        st.subheader("1. 個人別結果")
         st.dataframe(df)
         
         st.subheader("2. クラス別・問題別正答率 (%)")
