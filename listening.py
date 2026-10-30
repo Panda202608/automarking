@@ -42,7 +42,6 @@ def load_special_rules():
 # 12個の黒四角マーカー自動検出 ＆ 自動向き補正 ＆ 3ブロック解析
 # ---------------------------------------------------------
 def detect_square_markers(gray_img):
-    """画像から完全に塗りつぶされた12個の黒四角マーカーを抽出"""
     norm_h, norm_w = gray_img.shape
     blurred = cv2.GaussianBlur(gray_img, (5, 5), 0)
     _, thresh = cv2.threshold(blurred, 100, 255, cv2.THRESH_BINARY_INV)
@@ -55,15 +54,13 @@ def detect_square_markers(gray_img):
         area = cv2.contourArea(c)
         solidity = area / float(bw * bh) if (bw * bh) > 0 else 0
 
-        # 正方形かつ塗りつぶされた黒四角（Solidity > 0.82）
         if 0.75 < aspect < 1.35 and (norm_w * 0.008) < bw < (norm_w * 0.035) and (norm_h * 0.008) < bh < (norm_h * 0.035) and solidity > 0.82:
             square_markers.append((x + bw/2.0, y + bh/2.0))
             
     return square_markers
 
 def auto_orient_and_get_markers(image):
-    """画像の上下左右（0度,90度,180度,270度）から正しい向き（受験番号が左）を自動認識"""
-    for rot in [0, 1, 2, 3]: # 0:そのまま, 1:90度, 2:180度, 3:270度
+    for rot in [0, 1, 2, 3]:
         if rot == 0:
             test_img = image.copy()
         elif rot == 1:
@@ -74,48 +71,40 @@ def auto_orient_and_get_markers(image):
             test_img = cv2.rotate(image, cv2.ROTATE_90_COUNTERCLOCKWISE)
 
         h, w = test_img.shape[:2]
-        if w < h: # 横長でない場合はスキップ
+        if w < h:
             continue
 
         gray = cv2.cvtColor(test_img, cv2.COLOR_BGR2GRAY)
         markers = detect_square_markers(gray)
 
         if len(markers) >= 10:
-            # X座標でソート
             markers_sorted_x = sorted(markers, key=lambda m: m[0])
-            # 左グループ4個のY範囲と、中央グループ4個のY範囲を比較
             left_ys = [m[1] for m in markers_sorted_x[:4]]
             mid_ys = [m[1] for m in markers_sorted_x[4:8]]
             
             left_h = max(left_ys) - min(left_ys)
             mid_h = max(mid_ys) - min(mid_ys)
 
-            # 受験番号欄（左）は解答欄（中央）よりも縦幅が短い構造
             if left_h < mid_h:
                 return test_img, markers
 
-    # 自動判定できなかった場合は元の画像のまま返す
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     return image, detect_square_markers(gray)
 
 def analyze_mark_sheet(image_file):
-    # PILで読み込んでEXIF回転を正規化
     pil_img = Image.open(image_file)
     pil_img = ImageOps.exif_transpose(pil_img)
     image = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
     image_file.seek(0)
 
-    # 標準解像度にリサイズ（3000 x 2100）
     norm_w, norm_h = 3000, 2100
     image = cv2.resize(image, (norm_w, norm_h))
 
-    # 自動回転＆マーカー認識
     oriented_img, markers = auto_orient_and_get_markers(image)
     gray = cv2.cvtColor(oriented_img, cv2.COLOR_BGR2GRAY)
     debug_img = oriented_img.copy()
 
     def warp_block(pts_4, target_w, target_h):
-        """4点のマーカーから長方形ブロックを抽出して二値化"""
         pts_src = np.array(pts_4, dtype="float32")
         pts_dst = np.array([[0, 0], [target_w - 1, 0], [0, target_h - 1], [target_w - 1, target_h - 1]], dtype="float32")
         M = cv2.getPerspectiveTransform(pts_src, pts_dst)
@@ -127,20 +116,17 @@ def analyze_mark_sheet(image_file):
     recognized_answers = {f'Q{i}': "未マーク/無効" for i in range(1, 51)}
 
     if len(markers) >= 12:
-        # X座標順にソートして3つのブロックに分離
         markers_sorted_x = sorted(markers, key=lambda m: m[0])
-        group_exam = sorted(markers_sorted_x[0:4], key=lambda m: (m[1], m[0]))  # 受験番号 (左4個)
-        group_q1_25 = sorted(markers_sorted_x[4:8], key=lambda m: (m[1], m[0])) # Q1~25 (中央4個)
-        group_q26_50 = sorted(markers_sorted_x[8:12], key=lambda m: (m[1], m[0]))# Q26~50 (右4個)
+        group_exam = sorted(markers_sorted_x[0:4], key=lambda m: (m[1], m[0]))
+        group_q1_25 = sorted(markers_sorted_x[4:8], key=lambda m: (m[1], m[0]))
+        group_q26_50 = sorted(markers_sorted_x[8:12], key=lambda m: (m[1], m[0]))
 
-        # 1. 受験番号ブロックの解析 (千・百・十・一位)
         try:
             pts_exam = [group_exam[0], group_exam[1], group_exam[2], group_exam[3]]
             bin_exam = warp_block(pts_exam, 400, 600)
             digits = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"]
             parsed_digits = []
             
-            # 千・百・十・一の4列 (インデックス1〜4)
             for col_idx in range(1, 5):
                 best_d = "0"
                 max_p = 0
@@ -159,7 +145,6 @@ def analyze_mark_sheet(image_file):
         except Exception:
             pass
 
-        # 2. 問 1 〜 25 ブロックの解析
         try:
             pts_q1 = [group_q1_25[0], group_q1_25[1], group_q1_25[2], group_q1_25[3]]
             bin_q1 = warp_block(pts_q1, 600, 1800)
@@ -185,7 +170,6 @@ def analyze_mark_sheet(image_file):
         except Exception:
             pass
 
-        # 3. 問 26 〜 50 ブロックの解析
         try:
             pts_q2 = [group_q26_50[0], group_q26_50[1], group_q26_50[2], group_q26_50[3]]
             bin_q2 = warp_block(pts_q2, 600, 1800)
@@ -211,14 +195,12 @@ def analyze_mark_sheet(image_file):
         except Exception:
             pass
 
-        # 検出マーカー12箇所を緑色の円で可視化
         for m in markers:
             cv2.circle(debug_img, (int(m[0]), int(m[1])), 20, (0, 255, 0), -1)
 
     debug_img_rgb = cv2.cvtColor(debug_img, cv2.COLOR_BGR2RGB)
     return recognized_exam_id, recognized_answers, debug_img_rgb
 
-# セッション状態初期化
 if "step" not in st.session_state:
     st.session_state.step = 1
 
@@ -228,9 +210,6 @@ mode = st.sidebar.radio("モード選択", [
     "教員用（集計・Excel出力）"
 ])
 
-# ---------------------------------------------------------
-# 1. 生徒用：確認画面付き採点フロー
-# ---------------------------------------------------------
 if mode == "生徒用（マーク撮影・採点）":
     st.header("■ 生徒用 マークシート送信・採点")
     answer_key = load_answer_key()
@@ -305,4 +284,128 @@ if mode == "生徒用（マーク撮影・採点）":
         st.markdown("---")
         col_btn1, col_btn2 = st.columns([1, 2])
         with col_btn1:
-            if st.button("◀ 画像を撮り直す",
+            if st.button("◀ 画像を撮り直す", use_container_width=True):
+                st.session_state.step = 1
+                st.rerun()
+        with col_btn2:
+            if st.button("この内容で確定して採点する ▶", type="primary", use_container_width=True):
+                if not student_id:
+                    st.error("出席番号/受験番号を入力してください。")
+                else:
+                    st.session_state.final_class = student_class
+                    st.session_state.final_student_id = student_id
+                    st.session_state.final_answers = final_answers
+                    st.session_state.step = 3
+                    st.rerun()
+
+    elif st.session_state.step == 3:
+        st.subheader("STEP 3: 採点結果")
+        user_ans = st.session_state.final_answers
+        student_class = st.session_state.final_class
+        student_id = st.session_state.final_student_id
+        
+        total_score = 0
+        results_dict = {}
+        processed_qs = set()
+        
+        row_data = {
+            '日時': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'クラス': student_class,
+            '出席番号': student_id
+        }
+
+        for rule in special_rules.get("unordered", []):
+            qs = rule["questions"]
+            target_ans = set(rule["answers"])
+            user_target_ans = set([user_ans.get(q) for q in qs])
+            is_correct = (user_target_ans == target_ans)
+            for q in qs:
+                p = rule.get("point_per_q", points_key.get(q, 2.0))
+                score = p if is_correct else 0
+                total_score += score
+                results_dict[q] = {
+                    '問題': f"{q} (順不同)",
+                    'あなたのマーク': user_ans.get(q),
+                    '正解': "/".join(map(str, sorted(list(target_ans)))),
+                    '判定': "〇" if is_correct else "✕",
+                    '配点': p,
+                    '獲得点数': score
+                }
+                processed_qs.add(q)
+                row_data[q] = user_ans.get(q)
+                row_data[f'{q}_正誤'] = 1 if is_correct else 0
+
+        for rule in special_rules.get("all_correct", []):
+            qs = rule["questions"]
+            is_all_correct = all([user_ans.get(q) == answer_key.get(q) for q in qs])
+            group_pt = rule.get("group_point", 4.0)
+            for idx, q in enumerate(qs):
+                if idx == 0: total_score += (group_pt if is_all_correct else 0)
+                results_dict[q] = {
+                    '問題': f"{q} (完答対象)",
+                    'あなたのマーク': user_ans.get(q),
+                    '正解': answer_key.get(q),
+                    '判定': "〇" if is_all_correct else "✕",
+                    '配点': f"グループ計{group_pt}" if idx == 0 else "-",
+                    '獲得点数': group_pt if (is_all_correct and idx == 0) else (0 if idx == 0 else "-")
+                }
+                processed_qs.add(q)
+                row_data[q] = user_ans.get(q)
+                row_data[f'{q}_正誤'] = 1 if is_all_correct else 0
+
+        for q, correct_ans in answer_key.items():
+            if q in processed_qs: continue
+            u_a = user_ans.get(q)
+            q_p = points_key.get(q, 2.0)
+            is_c = (u_a == correct_ans)
+            score = q_p if is_c else 0
+            total_score += score
+            
+            results_dict[q] = {
+                '問題': q, 'あなたのマーク': u_a, '正解': correct_ans,
+                '判定': "〇" if is_c else "✕", '配点': q_p, '獲得点数': score
+            }
+            row_data[q] = u_a
+            row_data[f'{q}_正誤'] = 1 if is_c else 0
+
+        results_list = [results_dict[f'Q{i}'] for i in range(1, 51) if f'Q{i}' in results_dict]
+        
+        max_possible_score = sum([points_key[q] for q in points_key if q not in processed_qs])
+        for r in special_rules.get("unordered", []):
+            max_possible_score += sum([r.get("point_per_q", 2.0) for _ in r["questions"]])
+        for r in special_rules.get("all_correct", []):
+            max_possible_score += r.get("group_point", 4.0)
+
+        row_data['合計点'] = round(total_score, 1)
+
+        st.balloons()
+        st.success("採点が完了しました！")
+        st.metric(
+            label=f"【{student_class} / 番号: {student_id}】 さんの合計点", 
+            value=f"{round(total_score, 1)} / {round(max_possible_score, 1)} 点"
+        )
+        st.dataframe(pd.DataFrame(results_list), height=400, use_container_width=True)
+
+        df_new = pd.DataFrame([row_data])
+        if not os.path.exists(DATA_FILE):
+            df_new.to_csv(DATA_FILE, index=False, encoding='utf-8-sig')
+        else:
+            df_new.to_csv(DATA_FILE, mode='a', header=False, index=False, encoding='utf-8-sig')
+
+        if st.button("次の解答を採点する"):
+            st.session_state.step = 1
+            st.rerun()
+
+elif mode == "教員用（正解・配点・特殊ルール設定）":
+    st.header("■ 教員用 各種設定ダッシュボード")
+    tab1, tab2, tab3 = st.tabs(["1. 正解データ設定", "2. 基本配点設定", "3. 特殊ルール設定"])
+    
+    with tab1:
+        input_method = st.radio("入力方法を選択", ["📷 マークシート画像から自動読み取り", "✍️ 手入力"], horizontal=True)
+        if input_method == "📷 マークシート画像から自動読み取り":
+            ans_file = st.file_uploader("正解マークシート画像をアップロード", type=["jpg", "jpeg", "png"])
+            if ans_file and st.button("正解データとして登録", type="primary"):
+                _, extracted_answers, _ = analyze_mark_sheet(ans_file)
+                save_json_file(ANSWER_KEY_FILE, extracted_answers)
+                st.success("画像から正解データを登録しました！")
+                st.
