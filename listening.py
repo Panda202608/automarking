@@ -4,7 +4,7 @@ import json
 import os
 import cv2
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageOps
 from datetime import datetime
 
 # --- データ保存用ファイルパス ---
@@ -39,169 +39,181 @@ def load_special_rules():
     return load_json_file(RULES_KEY_FILE, {"unordered": [], "all_correct": []})
 
 # ---------------------------------------------------------
-# 横型マークシート（黒四角マーカー自動追尾）自動解析関数
+# 12個の黒四角マーカー自動検出 ＆ 自動向き補正 ＆ 3ブロック解析
 # ---------------------------------------------------------
-def analyze_mark_sheet(image_file):
-    file_bytes = np.asarray(bytearray(image_file.read()), dtype=np.uint8)
-    image = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
-    image_file.seek(0)
-    
-    # 1. 横長（1200x850）に標準化して歪み・回転補正
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-    thresh = cv2.adaptiveThreshold(
-        blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 11, 2
-    )
+def detect_square_markers(gray_img):
+    """画像から完全に塗りつぶされた12個の黒四角マーカーを抽出"""
+    norm_h, norm_w = gray_img.shape
+    blurred = cv2.GaussianBlur(gray_img, (5, 5), 0)
+    _, thresh = cv2.threshold(blurred, 100, 255, cv2.THRESH_BINARY_INV)
+    contours, _ = cv2.findContours(thresh, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
 
-    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    contours = sorted(contours, key=cv2.contourArea, reverse=True)
-
-    warp_w, warp_h = 1200, 850
-    warped_color = None
-    warped_gray = None
-
+    square_markers = []
     for c in contours:
-        peri = cv2.arcLength(c, True)
-        approx = cv2.approxPolyDP(c, 0.02 * peri, True)
-        if len(approx) == 4:
-            pts = approx.reshape(4, 2)
-            rect = np.zeros((4, 2), dtype="float32")
-            s = pts.sum(axis=1)
-            rect[0] = pts[np.argmin(s)]     # 左上
-            rect[2] = pts[np.argmax(s)]     # 右下
-            diff = np.diff(pts, axis=1)
-            rect[1] = pts[np.argmin(diff)]  # 右上
-            rect[3] = pts[np.argmax(diff)]  # 左下
+        x, y, bw, bh = cv2.boundingRect(c)
+        aspect = float(bw) / bh
+        area = cv2.contourArea(c)
+        solidity = area / float(bw * bh) if (bw * bh) > 0 else 0
 
-            # 縦向きで撮影された場合は90度回転して横長に補正
-            w_len = np.linalg.norm(rect[1] - rect[0])
-            h_len = np.linalg.norm(rect[3] - rect[0])
-            if h_len > w_len:
-                rect = np.roll(rect, -1, axis=0)
-
-            dst = np.array([
-                [0, 0],
-                [warp_w - 1, 0],
-                [warp_w - 1, warp_h - 1],
-                [0, warp_h - 1]
-            ], dtype="float32")
-
-            M = cv2.getPerspectiveTransform(rect, dst)
-            warped_color = cv2.warpPerspective(image, M, (warp_w, warp_h))
-            warped_gray = cv2.warpPerspective(gray, M, (warp_w, warp_h))
-            break
-
-    if warped_gray is None:
-        warped_color = cv2.resize(image, (warp_w, warp_h))
-        warped_gray = cv2.resize(gray, (warp_w, warp_h))
-
-    _, binary_sheet = cv2.threshold(warped_gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-    debug_img = warped_color.copy()
-
-    # ---------------------------------------------------------
-    # 2. 受験番号欄の解析（千・百・十・一位 + 文理）
-    # ---------------------------------------------------------
-    exam_x_start, exam_x_end = 265, 465
-    exam_y_start, exam_y_end = 460, 730
-    
-    digits = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"]
-    parsed_digits = []
-    
-    # 4桁（千・百・十・一位）のマーク読み取り
-    col_w_exam = (exam_x_end - exam_x_start) / 5.0
-    row_h_exam = (exam_y_end - exam_y_start) / 10.0
-    
-    for col_idx in range(4): # 0:千, 1:百, 2:十, 3:一
-        best_digit = ""
-        max_pixels = 0
-        for row_idx in range(10):
-            x1 = int(exam_x_start + col_idx * col_w_exam + 2)
-            x2 = int(x1 + col_w_exam - 4)
-            y1 = int(exam_y_start + row_idx * row_h_exam + 2)
-            y2 = int(y1 + row_h_exam - 4)
+        # 正方形かつ塗りつぶされた黒四角（Solidity > 0.82）
+        if 0.75 < aspect < 1.35 and (norm_w * 0.008) < bw < (norm_w * 0.035) and (norm_h * 0.008) < bh < (norm_h * 0.035) and solidity > 0.82:
+            square_markers.append((x + bw/2.0, y + bh/2.0))
             
-            roi = binary_sheet[y1:y2, x1:x2]
-            count = cv2.countNonZero(roi)
-            cv2.rectangle(debug_img, (x1, y1), (x2, y2), (255, 165, 0), 1)
+    return square_markers
+
+def auto_orient_and_get_markers(image):
+    """画像の上下左右（0度,90度,180度,270度）から正しい向き（受験番号が左）を自動認識"""
+    for rot in [0, 1, 2, 3]: # 0:そのまま, 1:90度, 2:180度, 3:270度
+        if rot == 0:
+            test_img = image.copy()
+        elif rot == 1:
+            test_img = cv2.rotate(image, cv2.ROTATE_90_CLOCKWISE)
+        elif rot == 2:
+            test_img = cv2.rotate(image, cv2.ROTATE_180)
+        elif rot == 3:
+            test_img = cv2.rotate(image, cv2.ROTATE_90_COUNTERCLOCKWISE)
+
+        h, w = test_img.shape[:2]
+        if w < h: # 横長でない場合はスキップ
+            continue
+
+        gray = cv2.cvtColor(test_img, cv2.COLOR_BGR2GRAY)
+        markers = detect_square_markers(gray)
+
+        if len(markers) >= 10:
+            # X座標でソート
+            markers_sorted_x = sorted(markers, key=lambda m: m[0])
+            # 左グループ4個のY範囲と、中央グループ4個のY範囲を比較
+            left_ys = [m[1] for m in markers_sorted_x[:4]]
+            mid_ys = [m[1] for m in markers_sorted_x[4:8]]
             
-            if count > max_pixels and count > 30:
-                max_pixels = count
-                best_digit = digits[row_idx]
-                
-        parsed_digits.append(best_digit if best_digit != "" else "0")
-        
-    recognized_exam_id = "".join(parsed_digits)
+            left_h = max(left_ys) - min(left_ys)
+            mid_h = max(mid_ys) - min(mid_ys)
 
-    # ---------------------------------------------------------
-    # 3. 解答欄 (1〜25, 26〜50) の解析
-    # ---------------------------------------------------------
-    recognized_answers = {}
-    options_count = 9
+            # 受験番号欄（左）は解答欄（中央）よりも縦幅が短い構造
+            if left_h < mid_h:
+                return test_img, markers
 
-    left_col_x1, left_col_x2 = 562, 755
-    left_row_y_start, left_row_y_end = 168, 712
+    # 自動判定できなかった場合は元の画像のまま返す
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    return image, detect_square_markers(gray)
 
-    right_col_x1, right_col_x2 = 842, 1035
-    right_row_y_start, right_row_y_end = 168, 712
+def analyze_mark_sheet(image_file):
+    # PILで読み込んでEXIF回転を正規化
+    pil_img = Image.open(image_file)
+    pil_img = ImageOps.exif_transpose(pil_img)
+    image = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
+    image_file.seek(0)
 
-    row_h = (left_row_y_end - left_row_y_start) / 25.0
-    col_w = (left_col_x2 - left_col_x1) / float(options_count)
+    # 標準解像度にリサイズ（3000 x 2100）
+    norm_w, norm_h = 3000, 2100
+    image = cv2.resize(image, (norm_w, norm_h))
 
-    # 左列 (Q1 〜 Q25)
-    for i in range(25):
-        q_num = i + 1
-        q_key = f'Q{q_num}'
-        y1 = int(left_row_y_start + i * row_h + 3)
-        y2 = int(y1 + row_h - 6)
-        
-        best_opt = "未マーク/無効"
-        max_pixels = 0
-        best_box = None
-        
-        for opt in range(1, options_count + 1):
-            x1 = int(left_col_x1 + (opt - 1) * col_w + 2)
-            x2 = int(x1 + col_w - 4)
+    # 自動回転＆マーカー認識
+    oriented_img, markers = auto_orient_and_get_markers(image)
+    gray = cv2.cvtColor(oriented_img, cv2.COLOR_BGR2GRAY)
+    debug_img = oriented_img.copy()
+
+    def warp_block(pts_4, target_w, target_h):
+        """4点のマーカーから長方形ブロックを抽出して二値化"""
+        pts_src = np.array(pts_4, dtype="float32")
+        pts_dst = np.array([[0, 0], [target_w - 1, 0], [0, target_h - 1], [target_w - 1, target_h - 1]], dtype="float32")
+        M = cv2.getPerspectiveTransform(pts_src, pts_dst)
+        warped = cv2.warpPerspective(gray, M, (target_w, target_h))
+        _, bin_out = cv2.threshold(warped, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        return bin_out
+
+    recognized_exam_id = "0000"
+    recognized_answers = {f'Q{i}': "未マーク/無効" for i in range(1, 51)}
+
+    if len(markers) >= 12:
+        # X座標順にソートして3つのブロックに分離
+        markers_sorted_x = sorted(markers, key=lambda m: m[0])
+        group_exam = sorted(markers_sorted_x[0:4], key=lambda m: (m[1], m[0]))  # 受験番号 (左4個)
+        group_q1_25 = sorted(markers_sorted_x[4:8], key=lambda m: (m[1], m[0])) # Q1~25 (中央4個)
+        group_q26_50 = sorted(markers_sorted_x[8:12], key=lambda m: (m[1], m[0]))# Q26~50 (右4個)
+
+        # 1. 受験番号ブロックの解析 (千・百・十・一位)
+        try:
+            pts_exam = [group_exam[0], group_exam[1], group_exam[2], group_exam[3]]
+            bin_exam = warp_block(pts_exam, 400, 600)
+            digits = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"]
+            parsed_digits = []
             
-            roi = binary_sheet[y1:y2, x1:x2]
-            count = cv2.countNonZero(roi)
-            cv2.rectangle(debug_img, (x1, y1), (x2, y2), (0, 0, 255), 1)
-            
-            if count > max_pixels and count > 35:
-                max_pixels = count
-                best_opt = opt
-                best_box = (x1, y1, x2, y2)
-                
-        recognized_answers[q_key] = best_opt
-        if best_box:
-            cv2.rectangle(debug_img, (best_box[0], best_box[1]), (best_box[2], best_box[3]), (0, 255, 0), -1)
+            # 千・百・十・一の4列 (インデックス1〜4)
+            for col_idx in range(1, 5):
+                best_d = "0"
+                max_p = 0
+                x1 = int(col_idx * (400 / 6.0) + 4)
+                x2 = int(x1 + (400 / 6.0) - 8)
+                for row_idx in range(10):
+                    y1 = int(row_idx * (600 / 10.0) + 4)
+                    y2 = int(y1 + (600 / 10.0) - 8)
+                    roi = bin_exam[y1:y2, x1:x2]
+                    cnt = cv2.countNonZero(roi)
+                    if cnt > max_p and cnt > 40:
+                        max_p = cnt
+                        best_d = digits[row_idx]
+                parsed_digits.append(best_d)
+            recognized_exam_id = "".join(parsed_digits)
+        except Exception:
+            pass
 
-    # 右列 (Q26 〜 Q50)
-    for i in range(25):
-        q_num = i + 26
-        q_key = f'Q{q_num}'
-        y1 = int(right_row_y_start + i * row_h + 3)
-        y2 = int(y1 + row_h - 6)
-        
-        best_opt = "未マーク/無効"
-        max_pixels = 0
-        best_box = None
-        
-        for opt in range(1, options_count + 1):
-            x1 = int(right_col_x1 + (opt - 1) * col_w + 2)
-            x2 = int(x1 + col_w - 4)
-            
-            roi = binary_sheet[y1:y2, x1:x2]
-            count = cv2.countNonZero(roi)
-            cv2.rectangle(debug_img, (x1, y1), (x2, y2), (0, 0, 255), 1)
-            
-            if count > max_pixels and count > 35:
-                max_pixels = count
-                best_opt = opt
-                best_box = (x1, y1, x2, y2)
-                
-        recognized_answers[q_key] = best_opt
-        if best_box:
-            cv2.rectangle(debug_img, (best_box[0], best_box[1]), (best_box[2], best_box[3]), (0, 255, 0), -1)
+        # 2. 問 1 〜 25 ブロックの解析
+        try:
+            pts_q1 = [group_q1_25[0], group_q1_25[1], group_q1_25[2], group_q1_25[3]]
+            bin_q1 = warp_block(pts_q1, 600, 1800)
+            options_count = 9
+            col_w = 600.0 / options_count
+            row_h = 1800.0 / 25.0
+
+            for i in range(25):
+                q_key = f'Q{i+1}'
+                y1 = int(i * row_h + 4)
+                y2 = int(y1 + row_h - 8)
+                best_opt = "未マーク/無効"
+                max_p = 0
+                for opt in range(1, options_count + 1):
+                    x1 = int((opt - 1) * col_w + 4)
+                    x2 = int(x1 + col_w - 8)
+                    roi = bin_q1[y1:y2, x1:x2]
+                    cnt = cv2.countNonZero(roi)
+                    if cnt > max_p and cnt > 45:
+                        max_p = cnt
+                        best_opt = opt
+                recognized_answers[q_key] = best_opt
+        except Exception:
+            pass
+
+        # 3. 問 26 〜 50 ブロックの解析
+        try:
+            pts_q2 = [group_q26_50[0], group_q26_50[1], group_q26_50[2], group_q26_50[3]]
+            bin_q2 = warp_block(pts_q2, 600, 1800)
+            options_count = 9
+            col_w = 600.0 / options_count
+            row_h = 1800.0 / 25.0
+
+            for i in range(25):
+                q_key = f'Q{i+26}'
+                y1 = int(i * row_h + 4)
+                y2 = int(y1 + row_h - 8)
+                best_opt = "未マーク/無効"
+                max_p = 0
+                for opt in range(1, options_count + 1):
+                    x1 = int((opt - 1) * col_w + 4)
+                    x2 = int(x1 + col_w - 8)
+                    roi = bin_q2[y1:y2, x1:x2]
+                    cnt = cv2.countNonZero(roi)
+                    if cnt > max_p and cnt > 45:
+                        max_p = cnt
+                        best_opt = opt
+                recognized_answers[q_key] = best_opt
+        except Exception:
+            pass
+
+        # 検出マーカー12箇所を緑色の円で可視化
+        for m in markers:
+            cv2.circle(debug_img, (int(m[0]), int(m[1])), 20, (0, 255, 0), -1)
 
     debug_img_rgb = cv2.cvtColor(debug_img, cv2.COLOR_BGR2RGB)
     return recognized_exam_id, recognized_answers, debug_img_rgb
@@ -244,8 +256,8 @@ if mode == "生徒用（マーク撮影・採点）":
     elif st.session_state.step == 2:
         st.subheader("STEP 2: 読み取り結果の確認・修正")
         
-        with st.expander("🔍 AI解析位置の確認（デバッグ表示）", expanded=True):
-            st.image(st.session_state.debug_image, caption="オレンジ枠：受験番号 / 赤枠：解答欄 / 緑色：認識マーク", use_container_width=True)
+        with st.expander("🔍 AI解析マーカー位置の確認（デバッグ表示）", expanded=True):
+            st.image(st.session_state.debug_image, caption="緑色の円：自動検出された12箇所の基準点マーカー", use_container_width=True)
 
         col_info1, col_info2 = st.columns(2)
         with col_info1:
@@ -293,70 +305,4 @@ if mode == "生徒用（マーク撮影・採点）":
         st.markdown("---")
         col_btn1, col_btn2 = st.columns([1, 2])
         with col_btn1:
-            if st.button("◀ 画像を撮り直す", use_container_width=True):
-                st.session_state.step = 1
-                st.rerun()
-        with col_btn2:
-            if st.button("この内容で確定して採点する ▶", type="primary", use_container_width=True):
-                if not student_id:
-                    st.error("出席番号/受験番号を入力してください。")
-                else:
-                    st.session_state.final_class = student_class
-                    st.session_state.final_student_id = student_id
-                    st.session_state.final_answers = final_answers
-                    st.session_state.step = 3
-                    st.rerun()
-
-    elif st.session_state.step == 3:
-        st.subheader("STEP 3: 採点結果")
-        user_ans = st.session_state.final_answers
-        student_class = st.session_state.final_class
-        student_id = st.session_state.final_student_id
-        
-        total_score = 0
-        results_dict = {}
-        processed_qs = set()
-        
-        row_data = {
-            '日時': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-            'クラス': student_class,
-            '出席番号': student_id
-        }
-
-        for rule in special_rules.get("unordered", []):
-            qs = rule["questions"]
-            target_ans = set(rule["answers"])
-            user_target_ans = set([user_ans.get(q) for q in qs])
-            is_correct = (user_target_ans == target_ans)
-            for q in qs:
-                p = rule.get("point_per_q", points_key.get(q, 2.0))
-                score = p if is_correct else 0
-                total_score += score
-                results_dict[q] = {
-                    '問題': f"{q} (順不同)",
-                    'あなたのマーク': user_ans.get(q),
-                    '正解': "/".join(map(str, sorted(list(target_ans)))),
-                    '判定': "〇" if is_correct else "✕",
-                    '配点': p,
-                    '獲得点数': score
-                }
-                processed_qs.add(q)
-                row_data[q] = user_ans.get(q)
-                row_data[f'{q}_正誤'] = 1 if is_correct else 0
-
-        for rule in special_rules.get("all_correct", []):
-            qs = rule["questions"]
-            is_all_correct = all([user_ans.get(q) == answer_key.get(q) for q in qs])
-            group_pt = rule.get("group_point", 4.0)
-            for idx, q in enumerate(qs):
-                if idx == 0: total_score += (group_pt if is_all_correct else 0)
-                results_dict[q] = {
-                    '問題': f"{q} (完答対象)",
-                    'あなたのマーク': user_ans.get(q),
-                    '正解': answer_key.get(q),
-                    '判定': "〇" if is_all_correct else "✕",
-                    '配点': f"グループ計{group_pt}" if idx == 0 else "-",
-                    '獲得点数': group_pt if (is_all_correct and idx == 0) else (0 if idx == 0 else "-")
-                }
-                processed_qs.add(q)
-                row_
+            if st.button("◀ 画像を撮り直す",
