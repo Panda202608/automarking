@@ -39,25 +39,45 @@ def load_special_rules():
     return load_json_file(RULES_KEY_FILE, {"unordered": [], "all_correct": []})
 
 # ---------------------------------------------------------
-# 黒四角マーカー自動検出 ＆ 自動向き補正 ＆ デバッグ表示付き解析
+# マーカーソート＆堅牢な自動検出ロジック
 # ---------------------------------------------------------
+def sort_4_corners(pts):
+    """ 4つのマーカー座標を [左上, 右上, 左下, 右下] の順に確実に整列させる """
+    pts_by_y = sorted(pts, key=lambda m: m[1])
+    top_2 = sorted(pts_by_y[:2], key=lambda m: m[0])
+    bot_2 = sorted(pts_by_y[2:], key=lambda m: m[0])
+    return [top_2[0], top_2[1], bot_2[0], bot_2[1]]
+
 def detect_square_markers(gray_img):
     norm_h, norm_w = gray_img.shape
     blurred = cv2.GaussianBlur(gray_img, (5, 5), 0)
-    _, thresh = cv2.threshold(blurred, 100, 255, cv2.THRESH_BINARY_INV)
-    contours, _ = cv2.findContours(thresh, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+    
+    # 大津の二値化＋AdaptiveThresholdで影・照明ムラに強く二値化
+    methods = [
+        cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1],
+        cv2.adaptiveThreshold(blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 25, 7)
+    ]
 
-    square_markers = []
-    for c in contours:
-        x, y, bw, bh = cv2.boundingRect(c)
-        aspect = float(bw) / bh
-        area = cv2.contourArea(c)
-        solidity = area / float(bw * bh) if (bw * bh) > 0 else 0
+    for thresh in methods:
+        contours, _ = cv2.findContours(thresh, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+        square_markers = []
+        
+        for c in contours:
+            x, y, bw, bh = cv2.boundingRect(c)
+            aspect = float(bw) / bh
+            area = cv2.contourArea(c)
+            solidity = area / float(bw * bh) if (bw * bh) > 0 else 0
 
-        if 0.75 < aspect < 1.35 and (norm_w * 0.008) < bw < (norm_w * 0.035) and (norm_h * 0.008) < bh < (norm_h * 0.035) and solidity > 0.82:
-            square_markers.append((x + bw/2.0, y + bh/2.0))
-            
-    return square_markers
+            # 純正黒四角マーカーの精緻なフィルタリング
+            if 0.80 < aspect < 1.25 and (norm_w * 0.009) < bw < (norm_w * 0.025) and (norm_h * 0.012) < bh < (norm_h * 0.035) and solidity > 0.86:
+                cx, cy = x + bw/2.0, y + bh/2.0
+                if not any(abs(cx - mx) < 20 and abs(cy - my) < 20 for mx, my in square_markers):
+                    square_markers.append((cx, cy))
+
+        if len(square_markers) >= 12:
+            return square_markers
+
+    return []
 
 def auto_orient_and_get_markers(image):
     for rot in [0, 1, 2, 3]:
@@ -77,13 +97,13 @@ def auto_orient_and_get_markers(image):
         gray = cv2.cvtColor(test_img, cv2.COLOR_BGR2GRAY)
         markers = detect_square_markers(gray)
 
-        if len(markers) >= 10:
+        if len(markers) >= 12:
             markers_sorted_x = sorted(markers, key=lambda m: m[0])
-            left_ys = [m[1] for m in markers_sorted_x[:4]]
-            mid_ys = [m[1] for m in markers_sorted_x[4:8]]
+            left_block = sort_4_corners(markers_sorted_x[:4])
+            mid_block = sort_4_corners(markers_sorted_x[4:8])
             
-            left_h = max(left_ys) - min(left_ys)
-            mid_h = max(mid_ys) - min(mid_ys)
+            left_h = left_block[2][1] - left_block[0][1]
+            mid_h = mid_block[2][1] - mid_block[0][1]
 
             if left_h < mid_h:
                 return test_img, markers
@@ -120,14 +140,13 @@ def analyze_mark_sheet(image_file):
 
     if len(markers) >= 12:
         markers_sorted_x = sorted(markers, key=lambda m: m[0])
-        group_exam = sorted(markers_sorted_x[0:4], key=lambda m: (m[1], m[0]))
-        group_q1_25 = sorted(markers_sorted_x[4:8], key=lambda m: (m[1], m[0]))
-        group_q26_50 = sorted(markers_sorted_x[8:12], key=lambda m: (m[1], m[0]))
+        group_exam = sort_4_corners(markers_sorted_x[0:4])
+        group_q1_25 = sort_4_corners(markers_sorted_x[4:8])
+        group_q26_50 = sort_4_corners(markers_sorted_x[8:12])
 
         # 1. 受験番号ブロック
         try:
-            pts_exam = [group_exam[0], group_exam[1], group_exam[2], group_exam[3]]
-            bin_exam, color_exam = warp_block(pts_exam, 400, 600)
+            bin_exam, color_exam = warp_block(group_exam, 400, 600)
             img_exam_debug = color_exam.copy()
             digits = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"]
             parsed_digits = []
@@ -166,8 +185,7 @@ def analyze_mark_sheet(image_file):
 
         # 2. 問 1 〜 25 ブロック
         try:
-            pts_q1 = [group_q1_25[0], group_q1_25[1], group_q1_25[2], group_q1_25[3]]
-            bin_q1, color_q1 = warp_block(pts_q1, 600, 1800)
+            bin_q1, color_q1 = warp_block(group_q1_25, 600, 1800)
             img_q1_debug = color_q1.copy()
             options_count = 9
             col_w = 600.0 / options_count
@@ -210,8 +228,7 @@ def analyze_mark_sheet(image_file):
 
         # 3. 問 26 〜 50 ブロック
         try:
-            pts_q2 = [group_q26_50[0], group_q26_50[1], group_q26_50[2], group_q26_50[3]]
-            bin_q2, color_q2 = warp_block(pts_q2, 600, 1800)
+            bin_q2, color_q2 = warp_block(group_q26_50, 600, 1800)
             img_q2_debug = color_q2.copy()
             options_count = 9
             col_w = 600.0 / options_count
