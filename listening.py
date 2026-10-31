@@ -39,7 +39,7 @@ def load_special_rules():
     return load_json_file(RULES_KEY_FILE, {"unordered": [], "all_correct": []})
 
 # ---------------------------------------------------------
-# 12個の黒四角マーカー自動検出 ＆ 自動向き補正 ＆ 3ブロック解析
+# 黒四角マーカー自動検出 ＆ 自動向き補正 ＆ デバッグ表示付き解析
 # ---------------------------------------------------------
 def detect_square_markers(gray_img):
     norm_h, norm_w = gray_img.shape
@@ -102,18 +102,21 @@ def analyze_mark_sheet(image_file):
 
     oriented_img, markers = auto_orient_and_get_markers(image)
     gray = cv2.cvtColor(oriented_img, cv2.COLOR_BGR2GRAY)
-    debug_img = oriented_img.copy()
+    debug_main = oriented_img.copy()
 
     def warp_block(pts_4, target_w, target_h):
         pts_src = np.array(pts_4, dtype="float32")
         pts_dst = np.array([[0, 0], [target_w - 1, 0], [0, target_h - 1], [target_w - 1, target_h - 1]], dtype="float32")
         M = cv2.getPerspectiveTransform(pts_src, pts_dst)
-        warped = cv2.warpPerspective(gray, M, (target_w, target_h))
-        _, bin_out = cv2.threshold(warped, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-        return bin_out
+        warped_g = cv2.warpPerspective(gray, M, (target_w, target_h))
+        warped_c = cv2.warpPerspective(oriented_img, M, (target_w, target_h))
+        _, bin_out = cv2.threshold(warped_g, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        return bin_out, warped_c
 
     recognized_exam_id = "0000"
     recognized_answers = {f'Q{i}': "未マーク/無効" for i in range(1, 51)}
+
+    img_exam_debug, img_q1_debug, img_q2_debug = None, None, None
 
     if len(markers) >= 12:
         markers_sorted_x = sorted(markers, key=lambda m: m[0])
@@ -121,85 +124,143 @@ def analyze_mark_sheet(image_file):
         group_q1_25 = sorted(markers_sorted_x[4:8], key=lambda m: (m[1], m[0]))
         group_q26_50 = sorted(markers_sorted_x[8:12], key=lambda m: (m[1], m[0]))
 
+        # 1. 受験番号ブロック
         try:
             pts_exam = [group_exam[0], group_exam[1], group_exam[2], group_exam[3]]
-            bin_exam = warp_block(pts_exam, 400, 600)
+            bin_exam, color_exam = warp_block(pts_exam, 400, 600)
+            img_exam_debug = color_exam.copy()
             digits = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"]
             parsed_digits = []
             
+            col_w = 400.0 / 6.0
+            row_h = 600.0 / 10.0
+
             for col_idx in range(1, 5):
                 best_d = "0"
                 max_p = 0
-                x1 = int(col_idx * (400 / 6.0) + 4)
-                x2 = int(x1 + (400 / 6.0) - 8)
+                best_box = None
+                
                 for row_idx in range(10):
-                    y1 = int(row_idx * (600 / 10.0) + 4)
-                    y2 = int(y1 + (600 / 10.0) - 8)
+                    x1 = int(col_idx * col_w + col_w * 0.25)
+                    x2 = int(col_idx * col_w + col_w * 0.75)
+                    y1 = int(row_idx * row_h + row_h * 0.25)
+                    y2 = int(row_idx * row_h + row_h * 0.75)
+                    
                     roi = bin_exam[y1:y2, x1:x2]
                     cnt = cv2.countNonZero(roi)
-                    if cnt > max_p and cnt > 40:
+                    
+                    cv2.rectangle(img_exam_debug, (x1, y1), (x2, y2), (255, 165, 0), 1)
+                    
+                    if cnt > max_p and cnt > 20:
                         max_p = cnt
                         best_d = digits[row_idx]
+                        best_box = (x1, y1, x2, y2)
+                        
+                if best_box:
+                    cv2.rectangle(img_exam_debug, (best_box[0], best_box[1]), (best_box[2], best_box[3]), (0, 255, 0), -1)
                 parsed_digits.append(best_d)
+                
             recognized_exam_id = "".join(parsed_digits)
         except Exception:
             pass
 
+        # 2. 問 1 〜 25 ブロック
         try:
             pts_q1 = [group_q1_25[0], group_q1_25[1], group_q1_25[2], group_q1_25[3]]
-            bin_q1 = warp_block(pts_q1, 600, 1800)
+            bin_q1, color_q1 = warp_block(pts_q1, 600, 1800)
+            img_q1_debug = color_q1.copy()
             options_count = 9
             col_w = 600.0 / options_count
             row_h = 1800.0 / 25.0
 
             for i in range(25):
                 q_key = f'Q{i+1}'
-                y1 = int(i * row_h + 4)
-                y2 = int(y1 + row_h - 8)
                 best_opt = "未マーク/無効"
-                max_p = 0
+                best_box = None
+                
+                counts = []
+                boxes = []
                 for opt in range(1, options_count + 1):
-                    x1 = int((opt - 1) * col_w + 4)
-                    x2 = int(x1 + col_w - 8)
+                    x1 = int((opt - 1) * col_w + col_w * 0.2)
+                    x2 = int((opt - 1) * col_w + col_w * 0.8)
+                    y1 = int(i * row_h + row_h * 0.2)
+                    y2 = int(i * row_h + row_h * 0.8)
+                    
                     roi = bin_q1[y1:y2, x1:x2]
                     cnt = cv2.countNonZero(roi)
-                    if cnt > max_p and cnt > 45:
-                        max_p = cnt
-                        best_opt = opt
+                    counts.append(cnt)
+                    boxes.append((x1, y1, x2, y2))
+                    
+                    cv2.rectangle(img_q1_debug, (x1, y1), (x2, y2), (0, 0, 255), 1)
+
+                if counts:
+                    max_c = max(counts)
+                    avg_c = (sum(counts) - max_c) / float(len(counts) - 1) if len(counts) > 1 else 0
+                    max_idx = counts.index(max_c)
+                    
+                    if max_c > 25 and max_c > (avg_c * 1.8 + 10):
+                        best_opt = max_idx + 1
+                        best_box = boxes[max_idx]
+                        
                 recognized_answers[q_key] = best_opt
+                if best_box:
+                    cv2.rectangle(img_q1_debug, (best_box[0], best_box[1]), (best_box[2], best_box[3]), (0, 255, 0), -1)
         except Exception:
             pass
 
+        # 3. 問 26 〜 50 ブロック
         try:
             pts_q2 = [group_q26_50[0], group_q26_50[1], group_q26_50[2], group_q26_50[3]]
-            bin_q2 = warp_block(pts_q2, 600, 1800)
+            bin_q2, color_q2 = warp_block(pts_q2, 600, 1800)
+            img_q2_debug = color_q2.copy()
             options_count = 9
             col_w = 600.0 / options_count
             row_h = 1800.0 / 25.0
 
             for i in range(25):
                 q_key = f'Q{i+26}'
-                y1 = int(i * row_h + 4)
-                y2 = int(y1 + row_h - 8)
                 best_opt = "未マーク/無効"
-                max_p = 0
+                best_box = None
+                
+                counts = []
+                boxes = []
                 for opt in range(1, options_count + 1):
-                    x1 = int((opt - 1) * col_w + 4)
-                    x2 = int(x1 + col_w - 8)
+                    x1 = int((opt - 1) * col_w + col_w * 0.2)
+                    x2 = int((opt - 1) * col_w + col_w * 0.8)
+                    y1 = int(i * row_h + row_h * 0.2)
+                    y2 = int(i * row_h + row_h * 0.8)
+                    
                     roi = bin_q2[y1:y2, x1:x2]
                     cnt = cv2.countNonZero(roi)
-                    if cnt > max_p and cnt > 45:
-                        max_p = cnt
-                        best_opt = opt
+                    counts.append(cnt)
+                    boxes.append((x1, y1, x2, y2))
+                    
+                    cv2.rectangle(img_q2_debug, (x1, y1), (x2, y2), (0, 0, 255), 1)
+
+                if counts:
+                    max_c = max(counts)
+                    avg_c = (sum(counts) - max_c) / float(len(counts) - 1) if len(counts) > 1 else 0
+                    max_idx = counts.index(max_c)
+                    
+                    if max_c > 25 and max_c > (avg_c * 1.8 + 10):
+                        best_opt = max_idx + 1
+                        best_box = boxes[max_idx]
+                        
                 recognized_answers[q_key] = best_opt
+                if best_box:
+                    cv2.rectangle(img_q2_debug, (best_box[0], best_box[1]), (best_box[2], best_box[3]), (0, 255, 0), -1)
         except Exception:
             pass
 
         for m in markers:
-            cv2.circle(debug_img, (int(m[0]), int(m[1])), 20, (0, 255, 0), -1)
+            cv2.circle(debug_main, (int(m[0]), int(m[1])), 20, (0, 255, 0), -1)
 
-    debug_img_rgb = cv2.cvtColor(debug_img, cv2.COLOR_BGR2RGB)
-    return recognized_exam_id, recognized_answers, debug_img_rgb
+    debug_main_rgb = cv2.cvtColor(debug_main, cv2.COLOR_BGR2RGB)
+    img_exam_rgb = cv2.cvtColor(img_exam_debug, cv2.COLOR_BGR2RGB) if img_exam_debug is not None else None
+    img_q1_rgb = cv2.cvtColor(img_q1_debug, cv2.COLOR_BGR2RGB) if img_q1_debug is not None else None
+    img_q2_rgb = cv2.cvtColor(img_q2_debug, cv2.COLOR_BGR2RGB) if img_q2_debug is not None else None
+
+    return recognized_exam_id, recognized_answers, debug_main_rgb, img_exam_rgb, img_q1_rgb, img_q2_rgb
 
 if "step" not in st.session_state:
     st.session_state.step = 1
@@ -224,19 +285,44 @@ if mode == "生徒用（マーク撮影・採点）":
             st.image(uploaded_file, caption="撮影画像", width=450)
             if st.button("画像を解析して確認画面へ進む", type="primary"):
                 with st.spinner("マークを自動読み取り中..."):
-                    exam_id, answers, debug_img = analyze_mark_sheet(uploaded_file)
+                    exam_id, answers, debug_main, img_exam, img_q1, img_q2 = analyze_mark_sheet(uploaded_file)
                     st.session_state.uploaded_image = uploaded_file
                     st.session_state.recognized_exam_id = exam_id
                     st.session_state.recognized_answers = answers
-                    st.session_state.debug_image = debug_img
+                    st.session_state.debug_main = debug_main
+                    st.session_state.img_exam = img_exam
+                    st.session_state.img_q1 = img_q1
+                    st.session_state.img_q2 = img_q2
                     st.session_state.step = 2
                     st.rerun()
 
     elif st.session_state.step == 2:
         st.subheader("STEP 2: 読み取り結果の確認・修正")
         
-        with st.expander("🔍 AI解析マーカー位置の確認（デバッグ表示）", expanded=True):
-            st.image(st.session_state.debug_image, caption="緑色の円：自動検出された12箇所の基準点マーカー", use_container_width=True)
+        with st.expander("🔍 画像認識・切り出しデバッグ画像を表示（原因特定用）", expanded=True):
+            st.write("**1. 全体画像と検出された12個のマーカー（緑丸）**")
+            st.image(st.session_state.debug_main, use_container_width=True)
+            
+            st.write("**2. マーカー基準で補正された各領域の切り出し画像（赤枠：判定エリア / 緑枠：検出箇所）**")
+            c_d1, c_d2, c_d3 = st.columns([1, 1.5, 1.5])
+            with c_d1:
+                st.caption("【受験番号ブロック】")
+                if st.session_state.img_exam is not None:
+                    st.image(st.session_state.img_exam, use_container_width=True)
+                else:
+                    st.error("切り出し失敗")
+            with c_d2:
+                st.caption("【問 1 〜 25 ブロック】")
+                if st.session_state.img_q1 is not None:
+                    st.image(st.session_state.img_q1, use_container_width=True)
+                else:
+                    st.error("切り出し失敗")
+            with c_d3:
+                st.caption("【問 26 〜 50 ブロック】")
+                if st.session_state.img_q2 is not None:
+                    st.image(st.session_state.img_q2, use_container_width=True)
+                else:
+                    st.error("切り出し失敗")
 
         col_info1, col_info2 = st.columns(2)
         with col_info1:
@@ -405,7 +491,7 @@ elif mode == "教員用（正解・配点・特殊ルール設定）":
         if input_method == "📷 マークシート画像から自動読み取り":
             ans_file = st.file_uploader("正解マークシート画像をアップロード", type=["jpg", "jpeg", "png"])
             if ans_file and st.button("正解データとして登録", type="primary"):
-                _, extracted_answers, _ = analyze_mark_sheet(ans_file)
+                _, extracted_answers, _, _, _, _ = analyze_mark_sheet(ans_file)
                 save_json_file(ANSWER_KEY_FILE, extracted_answers)
                 st.success("画像から正解データを登録しました！")
                 st.rerun()
