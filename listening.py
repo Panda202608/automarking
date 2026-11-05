@@ -532,18 +532,30 @@ elif mode == "教員用（正解・配点・特殊ルール設定）":
 
         target_test_id = str(selected_t_id).zfill(2)
         t_config = load_test_config(target_test_id)
+        t_max_q = int(t_config.get("max_questions", 50))
+        t_total_score = int(t_config.get("total_score", 100))
+
+        # --- TEST ID が変更・選択された瞬間に保存データを画面入力欄に同期反映 ---
+        if "prev_target_test_id" not in st.session_state or st.session_state.prev_target_test_id != target_test_id:
+            st.session_state.prev_target_test_id = target_test_id
+            loaded_ans = load_answer_key(target_test_id, t_max_q)
+            loaded_pts = load_points_key(target_test_id, t_max_q)
+            for i in range(1, 51):
+                q_k = f'Q{i}'
+                st.session_state[f"ans_{target_test_id}_{q_k}"] = loaded_ans.get(q_k, 1)
+                st.session_state[f"pts_{target_test_id}_{q_k}"] = loaded_pts.get(q_k, 2)
 
         st.info(f"現在 **TEST ID: {target_test_id}** の正答・配点を設定・編集しています。")
         st.markdown("---")
 
         st.markdown("##### ⚙️ 1. テスト基本設定（問題数・合計点）")
         col_cfg1, col_cfg2, col_cfg3 = st.columns([2, 2, 1])
-        t_max_q = col_cfg1.number_input("問題数 (1〜50)", min_value=1, max_value=50, value=int(t_config.get("max_questions", 50)), step=1)
-        t_total_score = col_cfg2.number_input("合計点 (目標満点)", min_value=1, max_value=500, value=int(t_config.get("total_score", 100)), step=1)
+        new_max_q_val = col_cfg1.number_input("問題数 (1〜50)", min_value=1, max_value=50, value=t_max_q, step=1)
+        new_total_score_val = col_cfg2.number_input("合計点 (目標満点)", min_value=1, max_value=500, value=t_total_score, step=1)
         
         if col_cfg3.button("基本設定を保存"):
-            save_test_config(target_test_id, t_max_q, t_total_score)
-            st.success(f"TEST ID [{target_test_id}] の基本設定を保存しました！（全 {t_max_q} 問 / {t_total_score} 点満点）")
+            save_test_config(target_test_id, new_max_q_val, new_total_score_val)
+            st.success(f"TEST ID [{target_test_id}] の基本設定を保存しました！（全 {new_max_q_val} 問 / {new_total_score_val} 点満点）")
             st.rerun()
 
         st.markdown("---")
@@ -560,6 +572,7 @@ elif mode == "教員用（正解・配点・特殊ルール設定）":
                 _, _, extracted, _, _, _, _, _ = analyze_mark_sheet(ans_file, t_max_q, NUM_OPTS)
                 save_answer_key(target_test_id, extracted)
                 save_test_config(target_test_id, t_max_q, t_total_score)
+                st.session_state.prev_target_test_id = "" # 再読み込み同期用
                 st.success(f"TEST ID [{target_test_id}] の正答データを登録しました！")
                 st.rerun()
         else:
@@ -567,7 +580,6 @@ elif mode == "教員用（正解・配点・特殊ルール設定）":
             col_bp1, col_bp2 = st.columns([2, 1])
             bulk_val = col_bp1.number_input("全問の配点を一括変更（点）", min_value=0, max_value=50, value=2, step=1)
             
-            # --- 一括適用処理（修正版：session_stateの各キーへ新配点を直接代入） ---
             if col_bp2.button("全問一括適用", type="secondary"):
                 new_bulk_pts = {f'Q{i}': int(bulk_val) for i in range(1, t_max_q + 1)}
                 save_points_key(target_test_id, new_bulk_pts)
@@ -652,49 +664,4 @@ elif mode == "教員用（集計・Excel出力）":
         st.dataframe(df_display, use_container_width=True)
 
         st.subheader("2. 問題別 正答率 (%)")
-        ref_test_id = selected_test_id if selected_test_id != "すべて" else (unique_test_ids[0] if unique_test_ids else "01")
-        ref_t_cfg = load_test_config(ref_test_id)
-        ref_max_q = ref_t_cfg.get("max_questions", MAX_Q)
-        
-        answer_key = load_answer_key(ref_test_id, ref_max_q)
-        q_cols = list(answer_key.keys())
-        correct_cols = [f'{q}_正誤' for q in q_cols if f'{q}_正誤' in df_display.columns]
-        
-        if correct_cols and not df_display.empty:
-            q_acc = (df_display[correct_cols].mean() * 100).to_frame(name="正答率(%)").T
-            q_acc.columns = [col.replace('_正誤', '') for col in correct_cols]
-            st.dataframe(q_acc.style.format("{:.1f}%"), use_container_width=True)
-
-        if selected_test_id == "すべて" and len(unique_test_ids) > 1:
-            st.markdown("---")
-            st.subheader("3. TEST ID 別 統計・比較")
-            test_summary = df.groupby('TEST ID')['合計点'].agg(
-                提出件数='count',
-                平均点='mean',
-                最高点='max',
-                最低点='min'
-            ).reset_index()
-            test_summary['平均点'] = test_summary['平均点'].round(1)
-            st.dataframe(test_summary, use_container_width=True)
-
-        st.markdown("---")
-        excel_filename = f"集計結果_TEST_{selected_test_id}.xlsx"
-        excel_path = f"/tmp/{excel_filename}" if os.path.exists("/tmp") else excel_filename
-        
-        with pd.ExcelWriter(excel_path, engine='openpyxl') as writer:
-            df_display.to_excel(writer, sheet_name='個人別結果', index=False)
-            if correct_cols and not df_display.empty:
-                q_acc.to_excel(writer, sheet_name='問題別正答率')
-            if selected_test_id == "すべて":
-                df.groupby('TEST ID')['合計点'].describe().to_excel(writer, sheet_name='TEST_ID別統計')
-
-        with open(excel_path, "rb") as f:
-            st.download_button(
-                label=f"📥 選択中({selected_test_id})のデータをExcelでダウンロード",
-                data=f,
-                file_name=excel_filename,
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                type="primary"
-            )
-    else:
-        st.warning("まだ採点データが保存されていません。")
+        ref_test_id = selected_test_id if selected_test_id != "すべて"
