@@ -1,7 +1,8 @@
 streamlit
 pandas
-openpyxl
 opencv-python-headless
 numpy
 Pillow
+openpyxl
+plotly
 filelock
