@@ -93,9 +93,24 @@ def safe_read_csv(filepath):
     if not os.path.exists(filepath):
         return pd.DataFrame()
     try:
-        return pd.read_csv(filepath, encoding='utf-8-sig', on_bad_lines='skip')
+        return pd.read_csv(filepath, encoding='utf-8-sig')
     except Exception:
-        return pd.DataFrame()
+        try:
+            return pd.read_csv(filepath, encoding='utf-8-sig', on_bad_lines='skip')
+        except Exception:
+            return pd.DataFrame()
+
+def save_test_result_to_csv(row_data):
+    df_new = pd.DataFrame([row_data])
+    if os.path.exists(DATA_FILE):
+        df_existing = safe_read_csv(DATA_FILE)
+        if not df_existing.empty:
+            df_all = pd.concat([df_existing, df_new], ignore_index=True)
+        else:
+            df_all = df_new
+    else:
+        df_all = df_new
+    df_all.to_csv(DATA_FILE, index=False, encoding='utf-8-sig')
 
 # ---------------------------------------------------------
 # 12個マーカー分離アルゴリズム
@@ -422,109 +437,107 @@ if mode == "生徒用（マーク撮影・採点）":
                 st.rerun()
         with col_bot_btn2:
             if st.button("この内容で確定して採点する ▶", type="primary", use_container_width=True):
-                st.session_state.final_test_id = test_id_val
-                st.session_state.final_student_id = student_id_val
+                st.session_state.final_test_id = str(test_id_val).zfill(2)
+                st.session_state.final_student_id = str(student_id_val).zfill(4)
                 st.session_state.final_answers = final_answers
+
+                # --- 確定の瞬間に1回だけ自動採点・CSV保存を実行 ---
+                t_id = st.session_state.final_test_id
+                s_id = st.session_state.final_student_id
+                
+                t_cfg_calc = load_test_config(t_id)
+                t_max_q_calc = t_cfg_calc.get("max_questions", MAX_Q)
+
+                ans_key_calc = load_answer_key(t_id, t_max_q_calc)
+                pts_key_calc = load_points_key(t_id, t_max_q_calc)
+                spec_rules_calc = load_special_rules(t_id)
+
+                spec_q_map = {}
+                for r in spec_rules_calc:
+                    for q_num in range(r["start"], r["end"] + 1):
+                        spec_q_map[f'Q{q_num}'] = r
+
+                rule_res = []
+                for r in spec_rules_calc:
+                    all_c = True
+                    for q_num in range(r["start"], r["end"] + 1):
+                        q = f'Q{q_num}'
+                        if final_answers.get(q) != ans_key_calc.get(q):
+                            all_c = False
+                            break
+                    rule_res.append({"rule": r, "is_achieved": all_c})
+
+                t_score = 0
+                res_list = []
+                row_d = {
+                    '日時': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                    'TEST ID': t_id,
+                    'STUDENT ID': s_id
+                }
+
+                for i in range(1, t_max_q_calc + 1):
+                    q = f'Q{i}'
+                    u_a = final_answers.get(q)
+                    c_a = ans_key_calc.get(q)
+                    pts = pts_key_calc.get(q, 2)
+                    is_c = (u_a == c_a)
+                    
+                    sc = 0 if q in spec_q_map else (pts if is_c else 0)
+                    status = "〇" if is_c else "✕"
+
+                    t_score += sc
+                    res_list.append({'問題': q, 'あなたのマーク': u_a, '正解': c_a, '判定': status, '獲得点数': int(sc)})
+                    row_d[q] = u_a
+                    row_d[f'{q}_正誤'] = 1 if is_c else 0
+
+                for rr in rule_res:
+                    if rr["is_achieved"]:
+                        t_score += rr["rule"]["points"]
+
+                row_d['合計点'] = int(t_score)
+
+                # CSVに安全保存
+                save_test_result_to_csv(row_d)
+
+                # 結果表示用データの保持
+                st.session_state.result_total_score = int(t_score)
+                st.session_state.results_list = res_list
+                st.session_state.show_student_stats = False
+
                 st.session_state.step = 3
                 st.rerun()
 
     elif st.session_state.step == 3:
         st.subheader("STEP 3: 採点結果")
-        user_ans = st.session_state.final_answers
-        test_id = str(st.session_state.final_test_id).zfill(2)
+        test_id = st.session_state.final_test_id
         student_id = st.session_state.final_student_id
-        
-        t_cfg = load_test_config(test_id)
-        current_test_max_q = t_cfg.get("max_questions", MAX_Q)
-
-        answer_key = load_answer_key(test_id, current_test_max_q)
-        points_key = load_points_key(test_id, current_test_max_q)
-        special_rules = load_special_rules(test_id)
-
-        special_q_map = {}
-        for r in special_rules:
-            for q_num in range(r["start"], r["end"] + 1):
-                special_q_map[f'Q{q_num}'] = r
-
-        rule_results = []
-        for r in special_rules:
-            all_correct = True
-            for q_num in range(r["start"], r["end"] + 1):
-                q = f'Q{q_num}'
-                if user_ans.get(q) != answer_key.get(q):
-                    all_correct = False
-                    break
-            rule_results.append({
-                "rule": r,
-                "is_achieved": all_correct
-            })
-
-        total_score = 0
-        results_list = []
-        row_data = {
-            '日時': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-            'TEST ID': test_id,
-            'STUDENT ID': student_id
-        }
-
-        for i in range(1, current_test_max_q + 1):
-            q = f'Q{i}'
-            u_a = user_ans.get(q)
-            c_a = answer_key.get(q)
-            pts = points_key.get(q, 2)
-            is_c = (u_a == c_a)
-            
-            if q in special_q_map:
-                sc = 0 
-            else:
-                sc = pts if is_c else 0
-
-            status = "〇" if is_c else "✕"
-
-            total_score += sc
-            results_list.append({'問題': q, 'あなたのマーク': u_a, '正解': c_a, '判定': status, '獲得点数': int(sc)})
-            row_data[q] = u_a
-            row_data[f'{q}_正誤'] = 1 if is_c else 0
-
-        for rr in rule_results:
-            r = rr["rule"]
-            if rr["is_achieved"]:
-                total_score += r["points"]
-
-        row_data['合計点'] = int(total_score)
-
-        df_new = pd.DataFrame([row_data])
-        if not os.path.exists(DATA_FILE):
-            df_new.to_csv(DATA_FILE, index=False, encoding='utf-8-sig')
-        else:
-            df_new.to_csv(DATA_FILE, mode='a', header=False, index=False, encoding='utf-8-sig')
+        total_score = st.session_state.get("result_total_score", 0)
+        results_list = st.session_state.get("results_list", [])
+        user_ans = st.session_state.final_answers
 
         st.balloons()
-        st.metric(label=f"【TEST ID: {test_id} / STUDENT ID: {student_id}】 さんの合計点", value=f"{int(total_score)} 点")
+        st.metric(label=f"【TEST ID: {test_id} / STUDENT ID: {student_id}】 さんの合計点", value=f"{total_score} 点")
         st.dataframe(pd.DataFrame(results_list), height=350, use_container_width=True)
 
         st.markdown("---")
 
-        if "show_student_stats" not in st.session_state:
-            st.session_state.show_student_stats = False
-
         col_btn1, col_btn2 = st.columns([1, 1])
         with col_btn1:
             if st.button("📊 平均点データを見る", use_container_width=True):
-                st.session_state.show_student_stats = not st.session_state.show_student_stats
+                st.session_state.show_student_stats = not st.session_state.get("show_student_stats", False)
         with col_btn2:
             if st.button("次の解答を採点する ▶", type="primary", use_container_width=True):
                 st.session_state.show_student_stats = False
                 st.session_state.step = 1
                 st.rerun()
 
-        if st.session_state.show_student_stats:
+        if st.session_state.get("show_student_stats", False):
             st.markdown("---")
             st.subheader("📊 平均点・全体統計データ")
             
             df_all = safe_read_csv(DATA_FILE)
             if not df_all.empty and 'TEST ID' in df_all.columns:
-                df_all['TEST ID'] = df_all['TEST ID'].astype(str).str.zfill(2)
+                df_all['TEST ID'] = df_all['TEST ID'].astype(str).str.strip().str.zfill(2)
                 unique_test_ids = sorted(list(df_all['TEST ID'].unique()))
                 
                 default_idx = unique_test_ids.index(test_id) if test_id in unique_test_ids else 0
@@ -813,9 +826,9 @@ elif mode == "教員用（集計・Excel出力）":
     st.header("■ 教員用 集計ダッシュボード")
     df = safe_read_csv(DATA_FILE)
     if not df.empty and 'TEST ID' in df.columns:
-        df['TEST ID'] = df['TEST ID'].astype(str).str.zfill(2)
+        df['TEST ID'] = df['TEST ID'].astype(str).str.strip().str.zfill(2)
         if 'STUDENT ID' in df.columns:
-            df['STUDENT ID'] = df['STUDENT ID'].astype(str).str.zfill(4)
+            df['STUDENT ID'] = df['STUDENT ID'].astype(str).str.strip().str.zfill(4)
         
         unique_test_ids = sorted(list(df['TEST ID'].unique()))
         selected_test_id = st.selectbox("📌 集計対象の TEST ID を選択してください", unique_test_ids)
