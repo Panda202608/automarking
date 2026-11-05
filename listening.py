@@ -47,19 +47,12 @@ def load_special_rules():
     return load_json_file(RULES_KEY_FILE, {"unordered": [], "all_correct": []})
 
 # ---------------------------------------------------------
-# 堅牢な12個マーカー分離アルゴリズム
+# 12個マーカー分離アルゴリズム
 # ---------------------------------------------------------
 def group_12_markers_robust(markers):
-    """
-    12個のマーカーを傾きに影響されず正確に3ブロック(各4隅)に分離する
-    """
-    # 1. Y座標で上下6個ずつに分離
     markers_by_y = sorted(markers, key=lambda m: m[1])
     top_6 = sorted(markers_by_y[:6], key=lambda m: m[0])
     bot_6 = sorted(markers_by_y[6:], key=lambda m: m[0])
-    
-    # top_6: [B1左上, B1右上, B2左上, B2右上, B3左上, B3右上]
-    # bot_6: [B1左下, B1右下, B2左下, B2右下, B3左下, B3右下]
     
     group_exam = [top_6[0], top_6[1], bot_6[0], bot_6[1]]  # STUDENT ID
     group_q1   = [top_6[2], top_6[3], bot_6[2], bot_6[3]]  # Q1-25
@@ -110,7 +103,7 @@ def auto_orient_and_get_markers(image):
         elif rot == 3: test_img = cv2.rotate(image, cv2.ROTATE_90_COUNTERCLOCKWISE)
 
         h, w = test_img.shape[:2]
-        if w < h: continue # 横向き用紙を前提
+        if w < h: continue
 
         gray = cv2.cvtColor(test_img, cv2.COLOR_BGR2GRAY)
         markers, msg = detect_square_markers(gray)
@@ -118,7 +111,6 @@ def auto_orient_and_get_markers(image):
         if len(markers) == 12:
             try:
                 g_exam, g_q1, _ = group_12_markers_robust(markers)
-                # IDブロックの高さとQ1ブロックの平滑度チェック
                 if abs(g_exam[0][0] - g_exam[2][0]) < 100:
                     return test_img, markers, f"向き自動検出完了: {msg}"
             except:
@@ -231,7 +223,6 @@ def analyze_mark_sheet(image_file, max_q=50, num_opts=9):
                         avg_c = (sum(counts) - max_c) / float(len(counts) - 1) if len(counts) > 1 else 0
                         max_idx = counts.index(max_c)
                         
-                        # マーク判定 (平均との差分で影による誤動作を防止)
                         if max_c > 30 and max_c > (avg_c * 1.7 + 10):
                             best_opt = max_idx + 1
                             cv2.rectangle(debug_img, (boxes[max_idx][0], boxes[max_idx][1]), 
@@ -313,11 +304,7 @@ if mode == "生徒用（マーク撮影・採点）":
                 if st.session_state.img_q2 is not None: st.image(st.session_state.img_q2, use_container_width=True)
 
         raw_id = st.session_state.recognized_exam_id.zfill(4)
-        col_info1, col_info2 = st.columns(2)
-        with col_info1:
-            student_class = st.selectbox("クラス", ["1-A", "1-B", "1-C", "2-A", "2-B", "3-A", "3-B"])
-        with col_info2:
-            student_id = st.text_input("出席番号 / STUDENT ID (年・組・番・号)", value=raw_id)
+        student_id = st.text_input("STUDENT ID (年・組・番・号)", value=raw_id)
 
         st.markdown("---")
         options = list(range(1, NUM_OPTS + 1)) + ["未マーク/無効"]
@@ -345,7 +332,6 @@ if mode == "生徒用（マーク撮影・採点）":
 
         st.markdown("---")
         if st.button("この内容で確定して採点する ▶", type="primary", use_container_width=True):
-            st.session_state.final_class = student_class
             st.session_state.final_student_id = student_id
             st.session_state.final_answers = final_answers
             st.session_state.step = 3
@@ -354,11 +340,15 @@ if mode == "生徒用（マーク撮影・採点）":
     elif st.session_state.step == 3:
         st.subheader("STEP 3: 採点結果")
         user_ans = st.session_state.final_answers
-        student_class = st.session_state.final_class
         student_id = st.session_state.final_student_id
         
         total_score = 0
         results_list = []
+        row_data = {
+            '日時': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'STUDENT ID': student_id
+        }
+
         for i in range(1, MAX_Q + 1):
             q = f'Q{i}'
             u_a = user_ans.get(q)
@@ -368,10 +358,20 @@ if mode == "生徒用（マーク撮影・採点）":
             sc = pts if is_c else 0
             total_score += sc
             results_list.append({'問題': q, 'あなたのマーク': u_a, '正解': c_a, '判定': "〇" if is_c else "✕", '獲得点数': sc})
+            row_data[q] = u_a
+            row_data[f'{q}_正誤'] = 1 if is_c else 0
+
+        row_data['合計点'] = round(total_score, 1)
 
         st.balloons()
-        st.metric(label=f"【{student_class} / ID: {student_id}】 さんの合計点", value=f"{round(total_score, 1)} 点")
+        st.metric(label=f"【STUDENT ID: {student_id}】 さんの合計点", value=f"{round(total_score, 1)} 点")
         st.dataframe(pd.DataFrame(results_list), height=400, use_container_width=True)
+
+        df_new = pd.DataFrame([row_data])
+        if not os.path.exists(DATA_FILE):
+            df_new.to_csv(DATA_FILE, index=False, encoding='utf-8-sig')
+        else:
+            df_new.to_csv(DATA_FILE, mode='a', header=False, index=False, encoding='utf-8-sig')
 
         if st.button("次の解答を採点する"):
             st.session_state.step = 1
