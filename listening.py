@@ -20,7 +20,7 @@ st.set_page_config(page_title="共通テスト採点・集計システム", layo
 st.title("共通テスト演習 自動採点・集計システム")
 
 # ---------------------------------------------------------
-# 設定・データ管理関数（テストID対応・整数配点）
+# 設定・データ管理関数
 # ---------------------------------------------------------
 def load_json_file(filepath, default_data):
     if os.path.exists(filepath):
@@ -188,7 +188,6 @@ def analyze_mark_sheet(image_file, max_q=50, num_opts=9):
         try:
             g_exam, g_q1, g_q2 = group_12_markers_robust(markers)
 
-            # 1. TEST ID (2桁) & STUDENT ID (年・組・番・号 4桁)
             bin_exam, color_exam = warp_block(g_exam, 600, 1600)
             img_exam_debug = color_exam.copy()
             digits = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"]
@@ -226,7 +225,6 @@ def analyze_mark_sheet(image_file, max_q=50, num_opts=9):
             recognized_exam_id = "".join(parsed_digits[2:])
             logs.append(f"IDブロック読み取り完了 -> テストID: {recognized_test_id} / STUDENT ID: {recognized_exam_id}")
 
-            # 2. 解答欄解析 (選択肢 1〜9)
             def parse_q_range(bin_img, color_img, start_q_idx):
                 debug_img = color_img.copy()
                 qw, qh = bin_img.shape[1], bin_img.shape[0]
@@ -268,11 +266,9 @@ def analyze_mark_sheet(image_file, max_q=50, num_opts=9):
                     recognized_answers[q_key] = best_opt
                 return debug_img
 
-            # 問1〜25
             bin_q1, color_q1 = warp_block(g_q1, 950, 1600)
             img_q1_debug = parse_q_range(bin_q1, color_q1, 1)
 
-            # 問26〜50
             if max_q >= 26:
                 bin_q2, color_q2 = warp_block(g_q2, 950, 1600)
                 img_q2_debug = parse_q_range(bin_q2, color_q2, 26)
@@ -323,18 +319,19 @@ if mode == "生徒用（マーク撮影・採点）":
     if st.session_state.step == 1:
         st.subheader("STEP 1: マークシートの撮影・選択")
         
-        tab_cam, tab_file = st.tabs(["📷 カメラで撮影して読み取る", "📁 画像ファイルを選択"])
+        tab_cam, tab_file = st.tabs(["📷 Webカメラで撮影", "📱 スマホカメラで撮影 / ファイル選択"])
         
         target_image = None
         
         with tab_cam:
-            st.write("「Take Photo / 撮影」ボタンを押すとすぐにマークシートを読み取ります。")
-            camera_file = st.camera_input("マークシート全体が枠内に収まるように撮影してください")
+            st.warning("💡 **外カメラ（リアカメラ）への切り替え方法**：インカメラが起動した場合は、カメラ枠内の右下または右上にある **カメラ切替アイコン（🔄）** を押して外カメラに切り替えてください。")
+            camera_file = st.camera_input("マークシート全体が収まるように撮影してください")
             if camera_file is not None:
                 target_image = camera_file
                 
         with tab_file:
-            uploaded_file = st.file_uploader("保存済みのマークシート画像をアップロード", type=["jpg", "jpeg", "png"])
+            st.info("📱 スマホから利用する場合は、下の枠をタップして「写真を撮る」を選ぶと**標準の外カメラ**が直接立ち上がります。")
+            uploaded_file = st.file_uploader("写真を撮影するか、保存済みのマークシート画像を選択", type=["jpg", "jpeg", "png"])
             if uploaded_file is not None:
                 st.image(uploaded_file, caption="選択した画像", width=400)
                 if st.button("この画像を解析して進む ▶", type="primary"):
@@ -358,7 +355,6 @@ if mode == "生徒用（マーク撮影・採点）":
     elif st.session_state.step == 2:
         st.subheader("STEP 2: 読み取り結果の確認・修正")
         
-        # --- 再度読み取る / 撮り直す ボタン (最上部 & 最下部に配置) ---
         col_top_btn1, col_top_btn2 = st.columns([1, 2])
         with col_top_btn1:
             if st.button("🔄 再度読み取る（撮り直す）", type="secondary", use_container_width=True):
