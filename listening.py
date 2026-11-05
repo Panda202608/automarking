@@ -89,6 +89,14 @@ def save_special_rules(test_id, rules_list):
     data[t_key] = rules_list
     save_json_file(RULES_KEY_FILE, data)
 
+def safe_read_csv(filepath):
+    if not os.path.exists(filepath):
+        return pd.DataFrame()
+    try:
+        return pd.read_csv(filepath, encoding='utf-8-sig', on_bad_lines='skip')
+    except Exception:
+        return pd.DataFrame()
+
 # ---------------------------------------------------------
 # 12個マーカー分離アルゴリズム
 # ---------------------------------------------------------
@@ -495,8 +503,8 @@ if mode == "生徒用（マーク撮影・採点）":
         st.metric(label=f"【TEST ID: {test_id} / STUDENT ID: {student_id}】 さんの合計点", value=f"{int(total_score)} 点")
         st.dataframe(pd.DataFrame(results_list), height=350, use_container_width=True)
 
-        if os.path.exists(DATA_FILE):
-            df_all = pd.read_csv(DATA_FILE, encoding='utf-8-sig')
+        df_all = safe_read_csv(DATA_FILE)
+        if not df_all.empty and 'TEST ID' in df_all.columns:
             df_all['TEST ID'] = df_all['TEST ID'].astype(str).str.zfill(2)
             df_test = df_all[df_all['TEST ID'] == test_id]
             
@@ -602,107 +610,112 @@ elif mode == "教員用（正解・配点・特殊ルール設定）":
         current_answers = load_answer_key(target_test_id, t_max_q)
         current_points = load_points_key(target_test_id, t_max_q)
         
-        # 特殊配点（完答ルール）対象の問番号集合を取得
         current_rules = load_special_rules(target_test_id)
         special_q_set = set()
         for r in current_rules:
             for q_num in range(r["start"], r["end"] + 1):
                 special_q_set.add(q_num)
 
-        input_method = st.radio("入力方法を選択", ["✍️ 正答・配点の手入力", "📷 正解マークシート画像から正答を自動読み取り"], horizontal=True)
-
-        if input_method == "📷 正解マークシート画像から正答を自動読み取り":
-            ans_file = st.file_uploader(f"TEST ID [{target_test_id}] の模範解答マークシート画像をアップロード", type=["jpg", "jpeg", "png"])
-            if ans_file and st.button(f"画像から正答を登録 (TEST ID: {target_test_id})", type="primary"):
-                _, _, extracted, _, _, _, _, _ = analyze_mark_sheet(ans_file, t_max_q, NUM_OPTS)
-                save_answer_key(target_test_id, extracted)
-                save_test_config(target_test_id, t_max_q, t_total_score)
-                st.session_state.prev_target_test_id = "" # 再読み込み同期用
-                st.success(f"TEST ID [{target_test_id}] の正答データを登録しました！")
-                st.rerun()
-        else:
-            st.markdown("###### 💡 配点の一括変更")
+        st.markdown("###### 💡 配点の一括変更")
+        
+        col_bp1, col_bp2 = st.columns([2, 1])
+        bulk_val = col_bp1.number_input("全問の配点を一括変更（点）", min_value=0, max_value=50, value=2, step=1, key="bulk_all_pts")
+        if col_bp2.button("全問一括適用", type="secondary"):
+            new_bulk_pts = {f'Q{i}': (0 if i in special_q_set else int(bulk_val)) for i in range(1, t_max_q + 1)}
+            save_points_key(target_test_id, new_bulk_pts)
             
-            col_bp1, col_bp2 = st.columns([2, 1])
-            bulk_val = col_bp1.number_input("全問の配点を一括変更（点）", min_value=0, max_value=50, value=2, step=1, key="bulk_all_pts")
-            if col_bp2.button("全問一括適用", type="secondary"):
-                new_bulk_pts = {f'Q{i}': (0 if i in special_q_set else int(bulk_val)) for i in range(1, t_max_q + 1)}
-                save_points_key(target_test_id, new_bulk_pts)
-                
-                for i in range(1, t_max_q + 1):
-                    k = f"pts_{target_test_id}_Q{i}"
-                    st.session_state[k] = 0 if i in special_q_set else int(bulk_val)
-                
-                st.success(f"TEST ID [{target_test_id}] の全問配点を {int(bulk_val)} 点に変更しました！")
+            for i in range(1, t_max_q + 1):
+                k = f"pts_{target_test_id}_Q{i}"
+                st.session_state[k] = 0 if i in special_q_set else int(bulk_val)
+            
+            st.success(f"TEST ID [{target_test_id}] の全問配点を {int(bulk_val)} 点に変更しました！")
+            st.rerun()
+
+        st.markdown("###### 🎯 範囲を指定して配点を一括変更")
+        col_r1, col_r2, col_r3, col_r4 = st.columns([1.5, 1.5, 1.5, 1.5])
+        start_q = col_r1.number_input("開始問", min_value=1, max_value=t_max_q, value=1, step=1)
+        end_q = col_r2.number_input("終了問", min_value=1, max_value=t_max_q, value=min(25, t_max_q), step=1)
+        range_val = col_r3.number_input("配点（点）", min_value=0, max_value=50, value=2, step=1, key="bulk_range_pts")
+        
+        if col_r4.button("範囲一括適用", type="secondary"):
+            if start_q > end_q:
+                st.error("開始問は終了問以下に設定してください。")
+            else:
+                curr_pts = load_points_key(target_test_id, t_max_q)
+                for i in range(int(start_q), int(end_q) + 1):
+                    q_k = f'Q{i}'
+                    if i in special_q_set:
+                        curr_pts[q_k] = 0
+                        st.session_state[f"pts_{target_test_id}_{q_k}"] = 0
+                    else:
+                        curr_pts[q_k] = int(range_val)
+                        st.session_state[f"pts_{target_test_id}_{q_k}"] = int(range_val)
+                save_points_key(target_test_id, curr_pts)
+                st.success(f"問{int(start_q)} 〜 問{int(end_q)} の配点を {int(range_val)} 点に変更しました！")
                 st.rerun()
 
-            st.markdown("###### 🎯 範囲を指定して配点を一括変更")
-            col_r1, col_r2, col_r3, col_r4 = st.columns([1.5, 1.5, 1.5, 1.5])
-            start_q = col_r1.number_input("開始問", min_value=1, max_value=t_max_q, value=1, step=1)
-            end_q = col_r2.number_input("終了問", min_value=1, max_value=t_max_q, value=min(25, t_max_q), step=1)
-            range_val = col_r3.number_input("配点（点）", min_value=0, max_value=50, value=2, step=1, key="bulk_range_pts")
-            
-            if col_r4.button("範囲一括適用", type="secondary"):
-                if start_q > end_q:
-                    st.error("開始問は終了問以下に設定してください。")
-                else:
-                    curr_pts = load_points_key(target_test_id, t_max_q)
-                    for i in range(int(start_q), int(end_q) + 1):
-                        q_k = f'Q{i}'
-                        if i in special_q_set:
-                            curr_pts[q_k] = 0
-                            st.session_state[f"pts_{target_test_id}_{q_k}"] = 0
-                        else:
-                            curr_pts[q_k] = int(range_val)
-                            st.session_state[f"pts_{target_test_id}_{q_k}"] = int(range_val)
-                    save_points_key(target_test_id, curr_pts)
-                    st.success(f"問{int(start_q)} 〜 問{int(end_q)} の配点を {int(range_val)} 点に変更しました！")
+        st.markdown("---")
+        st.markdown("##### 🎯 3. 特殊配点（完答ルール）の設定")
+        st.caption("※「問18〜問21まですべて正解で4点」などの完答ルールを設定できます。対象となった設問の個別配点欄は自動的に非表示（🔒 完答ルール対象）となります。")
+
+        col_sr1, col_sr2, col_sr3, col_sr4 = st.columns([1.5, 1.5, 1.5, 1.5])
+        s_q = col_sr1.number_input("完答 開始問", min_value=1, max_value=t_max_q, value=18, step=1, key="sr_start_q")
+        e_q = col_sr2.number_input("完答 終了問", min_value=1, max_value=t_max_q, value=min(21, t_max_q), step=1, key="sr_end_q")
+        r_pts = col_sr3.number_input("完答時 得点", min_value=1, max_value=50, value=4, step=1, key="sr_pts")
+
+        if col_sr4.button("特殊ルールを追加", type="secondary"):
+            if s_q > e_q:
+                st.error("開始問は終了問以下に設定してください。")
+            else:
+                new_rule = {"start": int(s_q), "end": int(e_q), "points": int(r_pts)}
+                if new_rule not in current_rules:
+                    current_rules.append(new_rule)
+                    save_special_rules(target_test_id, current_rules)
+                    st.success(f"問{s_q}〜問{e_q}（完答 {r_pts}点）のルールを追加しました！")
                     st.rerun()
 
-            st.markdown("---")
-            st.markdown("##### 🎯 3. 特殊配点（完答ルール）の設定")
-            st.caption("※「問18〜問21まですべて正解で4点」などの完答ルールを設定できます。対象となった設問の個別配点欄は自動的に非表示（🔒 完答ルール対象）となります。")
+        if current_rules:
+            st.write("**登録済みの特殊ルール一覧:**")
+            for idx, r in enumerate(current_rules):
+                col_list1, col_list2 = st.columns([4, 1])
+                col_list1.write(f"・ **問 {r['start']} 〜 問 {r['end']}** ： 全問正解で **{r['points']} 点**")
+                if col_list2.button("削除", key=f"del_rule_{idx}"):
+                    current_rules.pop(idx)
+                    save_special_rules(target_test_id, current_rules)
+                    st.success("ルールを削除しました。")
+                    st.rerun()
+        else:
+            st.caption("現在設定されている特殊ルールはありません。")
 
-            col_sr1, col_sr2, col_sr3, col_sr4 = st.columns([1.5, 1.5, 1.5, 1.5])
-            s_q = col_sr1.number_input("完答 開始問", min_value=1, max_value=t_max_q, value=18, step=1, key="sr_start_q")
-            e_q = col_sr2.number_input("完答 終了問", min_value=1, max_value=t_max_q, value=min(21, t_max_q), step=1, key="sr_end_q")
-            r_pts = col_sr3.number_input("完答時 得点", min_value=1, max_value=50, value=4, step=1, key="sr_pts")
+        st.markdown("---")
+        st.markdown(f"###### ✍️ 個別配点・正答の入力 (問1 〜 問{t_max_q})")
+        
+        options = list(range(1, NUM_OPTS + 1))
+        new_answers = {}
+        new_points = {}
 
-            if col_sr4.button("特殊ルールを追加", type="secondary"):
-                if s_q > e_q:
-                    st.error("開始問は終了問以下に設定してください。")
+        col_a_l, col_a_r = st.columns(2)
+        with col_a_l:
+            st.markdown("###### ◀ 問 1 〜 25")
+            for i in range(1, min(26, t_max_q + 1)):
+                q_k = f'Q{i}'
+                idx = options.index(current_answers.get(q_k, 1)) if current_answers.get(q_k, 1) in options else 0
+                
+                q_c1, q_c2, q_c3 = st.columns([1, 2, 2])
+                q_c1.write(f"**問 {i}**")
+                new_answers[q_k] = q_c2.selectbox(f"正答_問{i}", options=options, index=idx, key=f"ans_{target_test_id}_{q_k}", label_visibility="collapsed")
+                
+                if i in special_q_set:
+                    q_c3.caption("🔒 完答ルール対象")
+                    new_points[q_k] = 0
                 else:
-                    new_rule = {"start": int(s_q), "end": int(e_q), "points": int(r_pts)}
-                    if new_rule not in current_rules:
-                        current_rules.append(new_rule)
-                        save_special_rules(target_test_id, current_rules)
-                        st.success(f"問{s_q}〜問{e_q}（完答 {r_pts}点）のルールを追加しました！")
-                        st.rerun()
+                    init_pt = int(st.session_state.get(f"pts_{target_test_id}_{q_k}", current_points.get(q_k, 2)))
+                    new_points[q_k] = q_c3.number_input(f"配点_問{i}", min_value=0, max_value=50, value=init_pt, step=1, key=f"pts_{target_test_id}_{q_k}", label_visibility="collapsed")
 
-            if current_rules:
-                st.write("**登録済みの特殊ルール一覧:**")
-                for idx, r in enumerate(current_rules):
-                    col_list1, col_list2 = st.columns([4, 1])
-                    col_list1.write(f"・ **問 {r['start']} 〜 問 {r['end']}** ： 全問正解で **{r['points']} 点**")
-                    if col_list2.button("削除", key=f"del_rule_{idx}"):
-                        current_rules.pop(idx)
-                        save_special_rules(target_test_id, current_rules)
-                        st.success("ルールを削除しました。")
-                        st.rerun()
-            else:
-                st.caption("現在設定されている特殊ルールはありません。")
-
-            st.markdown("---")
-            st.markdown(f"###### ✍️ 個別配点・正答の入力 (問1 〜 問{t_max_q})")
-            
-            options = list(range(1, NUM_OPTS + 1))
-            new_answers = {}
-            new_points = {}
-
-            col_a_l, col_a_r = st.columns(2)
-            with col_a_l:
-                st.markdown("###### ◀ 問 1 〜 25")
-                for i in range(1, min(26, t_max_q + 1)):
+        with col_a_r:
+            if t_max_q >= 26:
+                st.markdown(f"###### ▶ 問 26 〜 {t_max_q}")
+                for i in range(26, t_max_q + 1):
                     q_k = f'Q{i}'
                     idx = options.index(current_answers.get(q_k, 1)) if current_answers.get(q_k, 1) in options else 0
                     
@@ -710,35 +723,26 @@ elif mode == "教員用（正解・配点・特殊ルール設定）":
                     q_c1.write(f"**問 {i}**")
                     new_answers[q_k] = q_c2.selectbox(f"正答_問{i}", options=options, index=idx, key=f"ans_{target_test_id}_{q_k}", label_visibility="collapsed")
                     
-                    # 特殊ルール対象の問は配点入力欄を出さずメッセージを表示
                     if i in special_q_set:
                         q_c3.caption("🔒 完答ルール対象")
                         new_points[q_k] = 0
                     else:
-                        init_pt = int(current_points.get(q_k, 2))
+                        init_pt = int(st.session_state.get(f"pts_{target_test_id}_{q_k}", current_points.get(q_k, 2)))
                         new_points[q_k] = q_c3.number_input(f"配点_問{i}", min_value=0, max_value=50, value=init_pt, step=1, key=f"pts_{target_test_id}_{q_k}", label_visibility="collapsed")
 
-            with col_a_r:
-                if t_max_q >= 26:
-                    st.markdown(f"###### ▶ 問 26 〜 {t_max_q}")
-                    for i in range(26, t_max_q + 1):
-                        q_k = f'Q{i}'
-                        idx = options.index(current_answers.get(q_k, 1)) if current_answers.get(q_k, 1) in options else 0
-                        
-                        q_c1, q_c2, q_c3 = st.columns([1, 2, 2])
-                        q_c1.write(f"**問 {i}**")
-                        new_answers[q_k] = q_c2.selectbox(f"正答_問{i}", options=options, index=idx, key=f"ans_{target_test_id}_{q_k}", label_visibility="collapsed")
-                        
-                        # 特殊ルール対象の問は配点入力欄を出さずメッセージを表示
-                        if i in special_q_set:
-                            q_c3.caption("🔒 完答ルール対象")
-                            new_points[q_k] = 0
-                        else:
-                            init_pt = int(current_points.get(q_k, 2))
-                            new_points[q_k] = q_c3.number_input(f"配点_問{i}", min_value=0, max_value=50, value=init_pt, step=1, key=f"pts_{target_test_id}_{q_k}", label_visibility="collapsed")
+        # --- 配点の合計チェック ---
+        calculated_total = sum(new_points.values()) + sum(r["points"] for r in current_rules)
 
-            st.markdown("---")
-            if st.button(f"TEST ID [{target_test_id}] の正答・配点を一括保存する", type="primary", use_container_width=True):
+        st.markdown("---")
+        if calculated_total != t_total_score:
+            st.warning(f"⚠️ **配点合計の不一致**: 現在設定されている配点合計は **{calculated_total} 点** です。（基本設定の目標満点: **{t_total_score} 点**）")
+        else:
+            st.success(f"✅ **配点合計チェックOK**: 設定されている配点合計は **{calculated_total} 点**（目標満点: **{t_total_score} 点**）です。")
+
+        if st.button(f"TEST ID [{target_test_id}] の正答・配点を一括保存する", type="primary", use_container_width=True):
+            if calculated_total != t_total_score:
+                st.error(f"❌ 配点の合計（{calculated_total} 点）が基本設定の目標満点（{t_total_score} 点）と一致していません。配点を修正してから保存してください。")
+            else:
                 save_answer_key(target_test_id, new_answers)
                 save_points_key(target_test_id, new_points)
                 save_test_config(target_test_id, t_max_q, t_total_score)
@@ -747,8 +751,8 @@ elif mode == "教員用（正解・配点・特殊ルール設定）":
 
 elif mode == "教員用（集計・Excel出力）":
     st.header("■ 教員用 集計ダッシュボード")
-    if os.path.exists(DATA_FILE):
-        df = pd.read_csv(DATA_FILE, encoding='utf-8-sig')
+    df = safe_read_csv(DATA_FILE)
+    if not df.empty and 'TEST ID' in df.columns:
         df['TEST ID'] = df['TEST ID'].astype(str).str.zfill(2)
         
         unique_test_ids = sorted(list(df['TEST ID'].unique()))
@@ -820,4 +824,4 @@ elif mode == "教員用（集計・Excel出力）":
                 type="primary"
             )
     else:
-        st.warning("まだ採点データが保存されていません。")
+        st.warning("まだ採点データが保存されていないか、データの形式が不整合です。")
