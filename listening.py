@@ -12,7 +12,7 @@ DATA_FILE = "test_results.csv"
 ANSWER_KEY_FILE = "answer_keys.json"   # テストIDごとの正答
 POINTS_KEY_FILE = "points_keys.json"   # テストIDごとの配点
 TEST_CONFIG_FILE = "test_configs.json" # テストIDごとの問題数・合計点
-RULES_KEY_FILE = "special_rules.json"
+RULES_KEY_FILE = "special_rules.json"  # テストIDごとの特殊配点ルール
 CONFIG_FILE = "config.json"
 PASSWORD_FILE = "password.json"
 
@@ -78,8 +78,16 @@ def save_points_key(test_id, pts_dict):
     data[t_key] = {k: int(v) for k, v in pts_dict.items()}
     save_json_file(POINTS_KEY_FILE, data)
 
-def load_special_rules():
-    return load_json_file(RULES_KEY_FILE, {"unordered": [], "all_correct": []})
+def load_special_rules(test_id):
+    data = load_json_file(RULES_KEY_FILE, {})
+    t_key = str(test_id).zfill(2)
+    return data.get(t_key, [])
+
+def save_special_rules(test_id, rules_list):
+    data = load_json_file(RULES_KEY_FILE, {})
+    t_key = str(test_id).zfill(2)
+    data[t_key] = rules_list
+    save_json_file(RULES_KEY_FILE, data)
 
 # ---------------------------------------------------------
 # 12個マーカー分離アルゴリズム
@@ -423,6 +431,27 @@ if mode == "生徒用（マーク撮影・採点）":
 
         answer_key = load_answer_key(test_id, current_test_max_q)
         points_key = load_points_key(test_id, current_test_max_q)
+        special_rules = load_special_rules(test_id)
+
+        # 完答ルールの対象問題マップの作成
+        special_q_map = {}
+        for r in special_rules:
+            for q_num in range(r["start"], r["end"] + 1):
+                special_q_map[f'Q{q_num}'] = r
+
+        # 各完答ルールの達成判定
+        rule_results = []
+        for r in special_rules:
+            all_correct = True
+            for q_num in range(r["start"], r["end"] + 1):
+                q = f'Q{q_num}'
+                if user_ans.get(q) != answer_key.get(q):
+                    all_correct = False
+                    break
+            rule_results.append({
+                "rule": r,
+                "is_achieved": all_correct
+            })
 
         total_score = 0
         results_list = []
@@ -438,11 +467,24 @@ if mode == "生徒用（マーク撮影・採点）":
             c_a = answer_key.get(q)
             pts = points_key.get(q, 2)
             is_c = (u_a == c_a)
-            sc = pts if is_c else 0
+            
+            if q in special_q_map:
+                sc = 0 # 完答対象は個別点数を0点（グループ加算で一括計算）
+            else:
+                sc = pts if is_c else 0
+
+            status = "〇" if is_c else "✕"
+
             total_score += sc
-            results_list.append({'問題': q, 'あなたのマーク': u_a, '正解': c_a, '判定': "〇" if is_c else "✕", '獲得点数': int(sc)})
+            results_list.append({'問題': q, 'あなたのマーク': u_a, '正解': c_a, '判定': status, '獲得点数': int(sc)})
             row_data[q] = u_a
             row_data[f'{q}_正誤'] = 1 if is_c else 0
+
+        # 完答達成ボーナスを点数に加算
+        for rr in rule_results:
+            r = rr["rule"]
+            if rr["is_achieved"]:
+                total_score += r["points"]
 
         row_data['合計点'] = int(total_score)
 
@@ -578,7 +620,6 @@ elif mode == "教員用（正解・配点・特殊ルール設定）":
         else:
             st.markdown("###### 💡 配点の一括変更")
             
-            # --- 1. 全問一括適用 ---
             col_bp1, col_bp2 = st.columns([2, 1])
             bulk_val = col_bp1.number_input("全問の配点を一括変更（点）", min_value=0, max_value=50, value=2, step=1, key="bulk_all_pts")
             if col_bp2.button("全問一括適用", type="secondary"):
@@ -592,7 +633,6 @@ elif mode == "教員用（正解・配点・特殊ルール設定）":
                 st.success(f"TEST ID [{target_test_id}] の全問配点を {int(bulk_val)} 点に変更しました！")
                 st.rerun()
 
-            # --- 2. 範囲指定一括適用 (問○ 〜 問○) ---
             st.markdown("###### 🎯 範囲を指定して配点を一括変更")
             col_r1, col_r2, col_r3, col_r4 = st.columns([1.5, 1.5, 1.5, 1.5])
             start_q = col_r1.number_input("開始問", min_value=1, max_value=t_max_q, value=1, step=1)
@@ -611,6 +651,41 @@ elif mode == "教員用（正解・配点・特殊ルール設定）":
                     save_points_key(target_test_id, curr_pts)
                     st.success(f"問{int(start_q)} 〜 問{int(end_q)} の配点を {int(range_val)} 点に変更しました！")
                     st.rerun()
+
+            st.markdown("---")
+            st.markdown("##### 🎯 3. 特殊配点（完答ルール）の設定")
+            st.caption("※「問18〜問21まですべて正解で4点」などの完答ルールを設定できます。")
+
+            current_rules = load_special_rules(target_test_id)
+
+            col_sr1, col_sr2, col_sr3, col_sr4 = st.columns([1.5, 1.5, 1.5, 1.5])
+            s_q = col_sr1.number_input("完答 開始問", min_value=1, max_value=t_max_q, value=18, step=1, key="sr_start_q")
+            e_q = col_sr2.number_input("完答 終了問", min_value=1, max_value=t_max_q, value=min(21, t_max_q), step=1, key="sr_end_q")
+            r_pts = col_sr3.number_input("完答時 得点", min_value=1, max_value=50, value=4, step=1, key="sr_pts")
+
+            if col_sr4.button("特殊ルールを追加", type="secondary"):
+                if s_q > e_q:
+                    st.error("開始問は終了問以下に設定してください。")
+                else:
+                    new_rule = {"start": int(s_q), "end": int(e_q), "points": int(r_pts)}
+                    if new_rule not in current_rules:
+                        current_rules.append(new_rule)
+                        save_special_rules(target_test_id, current_rules)
+                        st.success(f"問{s_q}〜問{e_q}（完答 {r_pts}点）のルールを追加しました！")
+                        st.rerun()
+
+            if current_rules:
+                st.write("**登録済みの特殊ルール一覧:**")
+                for idx, r in enumerate(current_rules):
+                    col_list1, col_list2 = st.columns([4, 1])
+                    col_list1.write(f"・ **問 {r['start']} 〜 問 {r['end']}** ： 全問正解で **{r['points']} 点**")
+                    if col_list2.button("削除", key=f"del_rule_{idx}"):
+                        current_rules.pop(idx)
+                        save_special_rules(target_test_id, current_rules)
+                        st.success("ルールを削除しました。")
+                        st.rerun()
+            else:
+                st.caption("現在設定されている特殊ルールはありません。")
 
             st.markdown("---")
             st.markdown(f"###### ✍️ 個別配点・正答の入力 (問1 〜 問{t_max_q})")
