@@ -503,31 +503,91 @@ if mode == "生徒用（マーク撮影・採点）":
         st.metric(label=f"【TEST ID: {test_id} / STUDENT ID: {student_id}】 さんの合計点", value=f"{int(total_score)} 点")
         st.dataframe(pd.DataFrame(results_list), height=350, use_container_width=True)
 
-        df_all = safe_read_csv(DATA_FILE)
-        if not df_all.empty and 'TEST ID' in df_all.columns:
-            df_all['TEST ID'] = df_all['TEST ID'].astype(str).str.zfill(2)
-            df_test = df_all[df_all['TEST ID'] == test_id]
-            
-            if not df_test.empty:
-                st.markdown("---")
-                st.subheader(f"📊 全体統計 (TEST ID: {test_id})")
-                
-                s1, s2, s3 = st.columns(3)
-                s1.metric("受験人数", f"{len(df_test)} 人")
-                s2.metric("平均点", f"{round(df_test['合計点'].mean(), 1)} 点")
-                s3.metric("最高点", f"{int(df_test['合計点'].max())} 点")
-                
-                st.write("**【問題別正答率 (%)】**")
-                correct_cols = [f'{q}_正誤' for q in list(answer_key.keys()) if f'{q}_正誤' in df_test.columns]
-                if correct_cols:
-                    q_acc = (df_test[correct_cols].mean() * 100).to_frame(name="正答率(%)").T
-                    q_acc.columns = [col.replace('_正誤', '') for col in correct_cols]
-                    st.dataframe(q_acc.style.format("{:.1f}%"), use_container_width=True)
-
         st.markdown("---")
-        if st.button("次の解答を採点する", type="primary"):
-            st.session_state.step = 1
-            st.rerun()
+
+        if "show_student_stats" not in st.session_state:
+            st.session_state.show_student_stats = False
+
+        col_btn1, col_btn2 = st.columns([1, 1])
+        with col_btn1:
+            if st.button("📊 平均点データを見る", use_container_width=True):
+                st.session_state.show_student_stats = not st.session_state.show_student_stats
+        with col_btn2:
+            if st.button("次の解答を採点する ▶", type="primary", use_container_width=True):
+                st.session_state.show_student_stats = False
+                st.session_state.step = 1
+                st.rerun()
+
+        if st.session_state.show_student_stats:
+            st.markdown("---")
+            st.subheader("📊 平均点・全体統計データ")
+            
+            df_all = safe_read_csv(DATA_FILE)
+            if not df_all.empty and 'TEST ID' in df_all.columns:
+                df_all['TEST ID'] = df_all['TEST ID'].astype(str).str.zfill(2)
+                unique_test_ids = sorted(list(df_all['TEST ID'].unique()))
+                
+                default_idx = unique_test_ids.index(test_id) if test_id in unique_test_ids else 0
+                selected_stat_tid = st.selectbox("📌 表示する TEST ID を選択してください", unique_test_ids, index=default_idx)
+                
+                df_test = df_all[df_all['TEST ID'] == selected_stat_tid]
+                
+                if not df_test.empty:
+                    stat_t_cfg = load_test_config(selected_stat_tid)
+                    stat_max_q = stat_t_cfg.get("max_questions", MAX_Q)
+                    stat_answer_key = load_answer_key(selected_stat_tid, stat_max_q)
+
+                    s1, s2, s3 = st.columns(3)
+                    s1.metric("解答提出者数", f"{len(df_test)} 人")
+                    s2.metric("合計の平均点", f"{round(df_test['合計点'].mean(), 1)} 点")
+                    s3.metric("最高点", f"{int(df_test['合計点'].max())} 点")
+                    
+                    st.write("**【各問の正答率と個人の結果】**")
+                    
+                    stat_table = []
+                    warn_q_list = []
+                    
+                    for i in range(1, stat_max_q + 1):
+                        q = f'Q{i}'
+                        correct_val = stat_answer_key.get(q, "-")
+                        
+                        corr_col = f'{q}_正誤'
+                        if corr_col in df_test.columns:
+                            acc = df_test[corr_col].mean() * 100
+                        else:
+                            acc = 0.0
+
+                        if selected_stat_tid == test_id:
+                            my_mark = user_ans.get(q, "未解答")
+                            is_my_correct = (my_mark == correct_val)
+                            my_status = "〇" if is_my_correct else "✕"
+                        else:
+                            my_mark = "-"
+                            my_status = "-"
+                            is_my_correct = None
+
+                        warn_mark = ""
+                        if selected_stat_tid == test_id and is_my_correct is False and acc >= 80.0:
+                            warn_mark = "⚠️ 要復習 (正答率80%以上)"
+                            warn_q_list.append(q)
+
+                        stat_table.append({
+                            '問題': q,
+                            '正解': correct_val,
+                            'あなたのマーク': my_mark,
+                            'あなたの判定': my_status,
+                            '正答率': f"{acc:.1f}%",
+                            '警告': warn_mark
+                        })
+
+                    if warn_q_list:
+                        st.warning(f"⚠️ **【注意問題】** 正答率が8割（80%）以上にもかかわらず誤答した問題があります: **{', '.join(warn_q_list)}**")
+
+                    st.dataframe(pd.DataFrame(stat_table), height=350, use_container_width=True)
+                else:
+                    st.info("選択された TEST ID の提出データはまだありません。")
+            else:
+                st.warning("まだ採点データが保存されていません。")
 
 elif mode == "教員用（正解・配点・特殊ルール設定）":
     st.header("■ 教員用 各種設定ダッシュボード")
@@ -754,74 +814,104 @@ elif mode == "教員用（集計・Excel出力）":
     df = safe_read_csv(DATA_FILE)
     if not df.empty and 'TEST ID' in df.columns:
         df['TEST ID'] = df['TEST ID'].astype(str).str.zfill(2)
+        if 'STUDENT ID' in df.columns:
+            df['STUDENT ID'] = df['STUDENT ID'].astype(str).str.zfill(4)
         
         unique_test_ids = sorted(list(df['TEST ID'].unique()))
-        filter_options = ["すべて"] + unique_test_ids
-        selected_test_id = st.selectbox("📌 集計対象の TEST ID を選択してください", filter_options)
+        selected_test_id = st.selectbox("📌 集計対象の TEST ID を選択してください", unique_test_ids)
         
-        if selected_test_id != "すべて":
-            df_display = df[df['TEST ID'] == selected_test_id].copy()
-            st.info(f"現在 **TEST ID: {selected_test_id}** の結果を表示しています。")
-        else:
-            df_display = df.copy()
-            st.info("現在 **すべての TEST ID** の結果を表示しています。")
+        df_display = df[df['TEST ID'] == selected_test_id].copy()
+        st.info(f"現在 **TEST ID: {selected_test_id}** の集計結果を表示しています。")
 
         st.markdown("---")
         
+        ref_t_cfg = load_test_config(selected_test_id)
+        ref_total_score = ref_t_cfg.get("total_score", 100)
+
+        # 1. 基本指標
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("提出枚数", f"{len(df_display)} 枚")
-        m2.metric("平均点", f"{round(df_display['合計点'].mean(), 1)} 点" if not df_display.empty else "0 点")
-        m3.metric("最高点", f"{int(df_display['合計点'].max())} 点" if not df_display.empty else "0 点")
+        m2.metric("全平均点", f"{round(df_display['合計点'].mean(), 1)} 点" if not df_display.empty else "0 点")
+        
+        max_score = int(df_display['合計点'].max()) if not df_display.empty else 0
+        m3.metric("最高点", f"{max_score} 点 / {ref_total_score} 点")
         m4.metric("最低点", f"{int(df_display['合計点'].min())} 点" if not df_display.empty else "0 点")
 
+        # 最高点取得者のID表示
+        if not df_display.empty and max_score > 0:
+            top_students = df_display[df_display['合計点'] == max_score]['STUDENT ID'].tolist()
+            top_str = ", ".join([str(s).zfill(4) for s in top_students])
+            st.success(f"🏆 **最高点 ({max_score}点) を獲得した生徒 ID**: {top_str}")
+
         st.markdown("---")
-        st.subheader("1. 個人別解答・得点一覧")
-        st.dataframe(df_display, use_container_width=True)
-
-        st.subheader("2. 問題別 正答率 (%)")
-        ref_test_id = selected_test_id if selected_test_id != "すべて" else (unique_test_ids[0] if unique_test_ids else "01")
-        ref_t_cfg = load_test_config(ref_test_id)
-        ref_max_q = ref_t_cfg.get("max_questions", MAX_Q)
+        st.subheader("🏫 クラス別平均点")
         
-        answer_key = load_answer_key(ref_test_id, ref_max_q)
-        q_cols = list(answer_key.keys())
-        correct_cols = [f'{q}_正誤' for q in q_cols if f'{q}_正誤' in df_display.columns]
-        
-        if correct_cols and not df_display.empty:
-            q_acc = (df_display[correct_cols].mean() * 100).to_frame(name="正答率(%)").T
-            q_acc.columns = [col.replace('_正誤', '') for col in correct_cols]
-            st.dataframe(q_acc.style.format("{:.1f}%"), use_container_width=True)
+        def get_class_name(sid):
+            s = str(sid).zfill(4)
+            if len(s) >= 4 and s[:2].isdigit():
+                return f"{s[0]}年{s[1]}組"
+            return f"{s[:2]}組"
 
-        if selected_test_id == "すべて" and len(unique_test_ids) > 1:
-            st.markdown("---")
-            st.subheader("3. TEST ID 別 統計・比較")
-            test_summary = df.groupby('TEST ID')['合計点'].agg(
-                提出件数='count',
+        if not df_display.empty:
+            df_display['クラス'] = df_display['STUDENT ID'].apply(get_class_name)
+            class_summary = df_display.groupby('クラス')['合計点'].agg(
+                受験人数='count',
                 平均点='mean',
                 最高点='max',
                 最低点='min'
             ).reset_index()
-            test_summary['平均点'] = test_summary['平均点'].round(1)
-            st.dataframe(test_summary, use_container_width=True)
+            class_summary['平均点'] = class_summary['平均点'].round(1)
+            st.dataframe(class_summary, use_container_width=True)
 
-        st.markdown("---")
-        excel_filename = f"集計結果_TEST_{selected_test_id}.xlsx"
-        excel_path = f"/tmp/{excel_filename}" if os.path.exists("/tmp") else excel_filename
-        
-        with pd.ExcelWriter(excel_path, engine='openpyxl') as writer:
-            df_display.to_excel(writer, sheet_name='個人別結果', index=False)
-            if correct_cols and not df_display.empty:
-                q_acc.to_excel(writer, sheet_name='問題別正答率')
-            if selected_test_id == "すべて":
-                df.groupby('TEST ID')['合計点'].describe().to_excel(writer, sheet_name='TEST_ID別統計')
+            st.markdown("---")
+            st.subheader("⚠️ 得点率5割（50%）未満の生徒一覧")
+            
+            df_display['得点率(%)'] = (df_display['合計点'] / ref_total_score * 100).round(1)
+            low_scorers = df_display[df_display['合計点'] < (ref_total_score * 0.5)]
+            
+            if not low_scorers.empty:
+                st.error(f"⚠️ 得点率が5割を切っている生徒が **{len(low_scorers)} 名** います。")
+                st.dataframe(
+                    low_scorers[['STUDENT ID', 'クラス', '合計点', '得点率(%)']].reset_index(drop=True),
+                    use_container_width=True
+                )
+            else:
+                st.success("🎉 得点率が5割を切っている生徒はいません！")
 
-        with open(excel_path, "rb") as f:
-            st.download_button(
-                label=f"📥 選択中({selected_test_id})のデータをExcelでダウンロード",
-                data=f,
-                file_name=excel_filename,
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                type="primary"
-            )
+            st.markdown("---")
+            st.subheader("1. 個人別解答・得点一覧")
+            st.dataframe(df_display.drop(columns=['クラス', '得点率(%)'], errors='ignore'), use_container_width=True)
+
+            st.subheader("2. 問題別 正答率 (%)")
+            ref_max_q = ref_t_cfg.get("max_questions", MAX_Q)
+            answer_key = load_answer_key(selected_test_id, ref_max_q)
+            q_cols = list(answer_key.keys())
+            correct_cols = [f'{q}_正誤' for q in q_cols if f'{q}_正誤' in df_display.columns]
+            
+            if correct_cols:
+                q_acc = (df_display[correct_cols].mean() * 100).to_frame(name="正答率(%)").T
+                q_acc.columns = [col.replace('_正誤', '') for col in correct_cols]
+                st.dataframe(q_acc.style.format("{:.1f}%"), use_container_width=True)
+
+            st.markdown("---")
+            excel_filename = f"集計結果_TEST_{selected_test_id}.xlsx"
+            excel_path = f"/tmp/{excel_filename}" if os.path.exists("/tmp") else excel_filename
+            
+            with pd.ExcelWriter(excel_path, engine='openpyxl') as writer:
+                df_display.drop(columns=['クラス', '得点率(%)'], errors='ignore').to_excel(writer, sheet_name='個人別結果', index=False)
+                class_summary.to_excel(writer, sheet_name='クラス別平均点', index=False)
+                if not low_scorers.empty:
+                    low_scorers[['STUDENT ID', 'クラス', '合計点', '得点率(%)']].to_excel(writer, sheet_name='要フォロー生徒', index=False)
+                if correct_cols:
+                    q_acc.to_excel(writer, sheet_name='問題別正答率')
+
+            with open(excel_path, "rb") as f:
+                st.download_button(
+                    label=f"📥 TEST ID [{selected_test_id}] の全集計データをExcelでダウンロード",
+                    data=f,
+                    file_name=excel_filename,
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    type="primary"
+                )
     else:
         st.warning("まだ採点データが保存されていないか、データの形式が不整合です。")
