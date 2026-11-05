@@ -318,46 +318,33 @@ if mode == "生徒用（マーク撮影・採点）":
 
     if st.session_state.step == 1:
         st.subheader("STEP 1: マークシートの撮影・選択")
+        st.info("📱 下の枠をタップして「撮影」を選ぶと、スマホ・タブレットの外カメラが起動します。")
         
-        tab_cam, tab_file = st.tabs(["📷 Webカメラで撮影", "📱 スマホカメラで撮影 / ファイル選択"])
+        uploaded_file = st.file_uploader("撮影するか、マークシート画像を選択してください", type=["jpg", "jpeg", "png"])
         
-        target_image = None
-        
-        with tab_cam:
-            st.warning("💡 **外カメラ（リアカメラ）への切り替え方法**：インカメラが起動した場合は、カメラ枠内の右下または右上にある **カメラ切替アイコン（🔄）** を押して外カメラに切り替えてください。")
-            camera_file = st.camera_input("マークシート全体が収まるように撮影してください")
-            if camera_file is not None:
-                target_image = camera_file
-                
-        with tab_file:
-            st.info("📱 スマホから利用する場合は、下の枠をタップして「写真を撮る」を選ぶと**標準の外カメラ**が直接立ち上がります。")
-            uploaded_file = st.file_uploader("写真を撮影するか、保存済みのマークシート画像を選択", type=["jpg", "jpeg", "png"])
-            if uploaded_file is not None:
-                st.image(uploaded_file, caption="選択した画像", width=400)
-                if st.button("この画像を解析して進む ▶", type="primary"):
-                    target_image = uploaded_file
-
-        if target_image is not None:
-            with st.spinner("マークを自動読み取り中..."):
-                test_id, exam_id, answers, debug_main, img_exam, img_q1, img_q2, logs = analyze_mark_sheet(target_image, MAX_Q, NUM_OPTS)
-                st.session_state.uploaded_image = target_image
-                st.session_state.recognized_test_id = test_id
-                st.session_state.recognized_exam_id = exam_id
-                st.session_state.recognized_answers = answers
-                st.session_state.debug_main = debug_main
-                st.session_state.img_exam = img_exam
-                st.session_state.img_q1 = img_q1
-                st.session_state.img_q2 = img_q2
-                st.session_state.logs = logs
-                st.session_state.step = 2
-                st.rerun()
+        if uploaded_file is not None:
+            st.image(uploaded_file, caption="選択した画像", width=450)
+            if st.button("この画像を解析して進む ▶", type="primary", use_container_width=True):
+                with st.spinner("マークを自動読み取り中..."):
+                    test_id, exam_id, answers, debug_main, img_exam, img_q1, img_q2, logs = analyze_mark_sheet(uploaded_file, MAX_Q, NUM_OPTS)
+                    st.session_state.uploaded_image = uploaded_file
+                    st.session_state.recognized_test_id = test_id
+                    st.session_state.recognized_exam_id = exam_id
+                    st.session_state.recognized_answers = answers
+                    st.session_state.debug_main = debug_main
+                    st.session_state.img_exam = img_exam
+                    st.session_state.img_q1 = img_q1
+                    st.session_state.img_q2 = img_q2
+                    st.session_state.logs = logs
+                    st.session_state.step = 2
+                    st.rerun()
 
     elif st.session_state.step == 2:
         st.subheader("STEP 2: 読み取り結果の確認・修正")
         
         col_top_btn1, col_top_btn2 = st.columns([1, 2])
         with col_top_btn1:
-            if st.button("🔄 再度読み取る（撮り直す）", type="secondary", use_container_width=True):
+            if st.button("🔄 再撮影（撮り直す）", type="secondary", use_container_width=True):
                 st.session_state.step = 1
                 st.rerun()
 
@@ -414,7 +401,7 @@ if mode == "生徒用（マーク撮影・採点）":
         st.markdown("---")
         col_bot_btn1, col_bot_btn2 = st.columns([1, 2])
         with col_bot_btn1:
-            if st.button("🔄 再度読み取る（撮り直す）", key="btn_re_take", use_container_width=True):
+            if st.button("🔄 再撮影（撮り直す）", key="btn_re_take", use_container_width=True):
                 st.session_state.step = 1
                 st.rerun()
         with col_bot_btn2:
