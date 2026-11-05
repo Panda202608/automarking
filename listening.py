@@ -576,10 +576,11 @@ elif mode == "教員用（正解・配点・特殊ルール設定）":
                 st.success(f"TEST ID [{target_test_id}] の正答データを登録しました！")
                 st.rerun()
         else:
-            st.markdown("###### 💡 配点の一括変更（整数）")
-            col_bp1, col_bp2 = st.columns([2, 1])
-            bulk_val = col_bp1.number_input("全問の配点を一括変更（点）", min_value=0, max_value=50, value=2, step=1)
+            st.markdown("###### 💡 配点の一括変更")
             
+            # --- 1. 全問一括適用 ---
+            col_bp1, col_bp2 = st.columns([2, 1])
+            bulk_val = col_bp1.number_input("全問の配点を一括変更（点）", min_value=0, max_value=50, value=2, step=1, key="bulk_all_pts")
             if col_bp2.button("全問一括適用", type="secondary"):
                 new_bulk_pts = {f'Q{i}': int(bulk_val) for i in range(1, t_max_q + 1)}
                 save_points_key(target_test_id, new_bulk_pts)
@@ -590,6 +591,26 @@ elif mode == "教員用（正解・配点・特殊ルール設定）":
                 
                 st.success(f"TEST ID [{target_test_id}] の全問配点を {int(bulk_val)} 点に変更しました！")
                 st.rerun()
+
+            # --- 2. 範囲指定一括適用 (問○ 〜 問○) ---
+            st.markdown("###### 🎯 範囲を指定して配点を一括変更")
+            col_r1, col_r2, col_r3, col_r4 = st.columns([1.5, 1.5, 1.5, 1.5])
+            start_q = col_r1.number_input("開始問", min_value=1, max_value=t_max_q, value=1, step=1)
+            end_q = col_r2.number_input("終了問", min_value=1, max_value=t_max_q, value=min(25, t_max_q), step=1)
+            range_val = col_r3.number_input("配点（点）", min_value=0, max_value=50, value=2, step=1, key="bulk_range_pts")
+            
+            if col_r4.button("範囲一括適用", type="secondary"):
+                if start_q > end_q:
+                    st.error("開始問は終了問以下に設定してください。")
+                else:
+                    curr_pts = load_points_key(target_test_id, t_max_q)
+                    for i in range(int(start_q), int(end_q) + 1):
+                        q_k = f'Q{i}'
+                        curr_pts[q_k] = int(range_val)
+                        st.session_state[f"pts_{target_test_id}_{q_k}"] = int(range_val)
+                    save_points_key(target_test_id, curr_pts)
+                    st.success(f"問{int(start_q)} 〜 問{int(end_q)} の配点を {int(range_val)} 点に変更しました！")
+                    st.rerun()
 
             st.markdown("---")
             st.markdown(f"###### ✍️ 個別配点・正答の入力 (問1 〜 問{t_max_q})")
