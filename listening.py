@@ -840,7 +840,12 @@ elif mode == "教員用（集計・Excel出力）":
         selected_test_id = st.selectbox("📌 集計対象の TEST ID を選択してください", unique_test_ids)
         
         df_display = df[df['TEST ID'] == selected_test_id].copy()
-        st.info(f"現在 **TEST ID: {selected_test_id}** の集計結果を表示しています。")
+
+        # --- Student IDの昇順にソート ---
+        if 'STUDENT ID' in df_display.columns:
+            df_display = df_display.sort_values(by='STUDENT ID').reset_index(drop=True)
+
+        st.info(f"現在 **TEST ID: {selected_test_id}** の集計結果を表示しています。 (Student ID 順)")
 
         st.markdown("---")
         
@@ -899,9 +904,42 @@ elif mode == "教員用（集計・Excel出力）":
                 st.success("🎉 得点率が5割を切っている生徒はいません！")
 
             st.markdown("---")
-            st.subheader("1. 個人別解答・得点一覧")
+            st.subheader("1. 個人別解答・得点一覧 (Student ID 順)")
             st.dataframe(df_display.drop(columns=['クラス', '得点率(%)'], errors='ignore'), use_container_width=True)
 
+            # --- 🗑️ 不要データの削除機能 ---
+            st.markdown("---")
+            st.subheader("🗑️ 不要データの削除（重複・誤入力データの削除）")
+            with st.expander("⚠️ データ削除メニューを開く（クリックで展開）"):
+                st.caption("※ 重複して送信されたデータや誤ったデータを削除できます。削除対象を選択して実行してください。")
+                
+                df_target = df[df['TEST ID'] == selected_test_id].copy()
+                if 'STUDENT ID' in df_target.columns:
+                    df_target = df_target.sort_values(by='STUDENT ID')
+                
+                delete_options = [
+                    f"【ID: {row.get('STUDENT ID', '-') }】 日時: {row.get('日時', '-')} | 点数: {row.get('合計点', '-')}点 [元データIndex: {idx}]"
+                    for idx, row in df_target.iterrows()
+                ]
+                
+                selected_items_to_delete = st.multiselect("削除したい提出データを選択してください（複数選択可能）", delete_options)
+                
+                if st.button("❌ 選択したデータを完全に削除する", type="primary"):
+                    if selected_items_to_delete:
+                        indices_to_delete = [
+                            int(item.split("[元データIndex: ")[1].split("]")[0])
+                            for item in selected_items_to_delete
+                        ]
+                        
+                        df_updated = df.drop(index=indices_to_delete).reset_index(drop=True)
+                        df_updated.to_csv(DATA_FILE, index=False, encoding='utf-8-sig')
+                        
+                        st.success(f"{len(indices_to_delete)} 件のデータを正常に削除しました！")
+                        st.rerun()
+                    else:
+                        st.warning("削除するデータを選択してください。")
+
+            st.markdown("---")
             st.subheader("2. 問題別 正答率 (%)")
             ref_max_q = ref_t_cfg.get("max_questions", MAX_Q)
             answer_key = load_answer_key(selected_test_id, ref_max_q)
@@ -910,9 +948,34 @@ elif mode == "教員用（集計・Excel出力）":
             
             if correct_cols:
                 q_acc = df_display[correct_cols].apply(pd.to_numeric, errors='coerce').mean() * 100
+                
+                # --- 正答率7割（70%）未満の問題の抽出と警告表示 ---
+                low_acc_questions = [f"{col.replace('_正誤', '')} ({acc:.1f}%)" for col, acc in q_acc.items() if acc < 70.0]
+                if low_acc_questions:
+                    st.error(f"⚠️ **正答率が7割（70%）を切っている注意問題 ({len(low_acc_questions)}問)**: {', '.join(low_acc_questions)}")
+                else:
+                    st.success("🎉 すべての問題で正答率7割以上を達成しています！")
+
                 q_acc_df = q_acc.to_frame(name="正答率(%)").T
                 q_acc_df.columns = [col.replace('_正誤', '') for col in correct_cols]
-                st.dataframe(q_acc_df.style.format("{:.1f}%"), use_container_width=True)
+                
+                # --- セルのスタイリング関数 (70%未満を赤色＋太字に強調) ---
+                def style_low_acc(val):
+                    try:
+                        v = float(val)
+                        if v < 70.0:
+                            return 'background-color: #ffcdd2; color: #b71c1c; font-weight: bold;'
+                    except:
+                        pass
+                    return ''
+                
+                styler = q_acc_df.style
+                if hasattr(styler, 'map'):
+                    styled_df = styler.map(style_low_acc).format("{:.1f}%")
+                else:
+                    styled_df = styler.applymap(style_low_acc).format("{:.1f}%")
+
+                st.dataframe(styled_df, use_container_width=True)
 
             st.markdown("---")
             excel_filename = f"集計結果_TEST_{selected_test_id}.xlsx"
