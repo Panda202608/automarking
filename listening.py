@@ -567,14 +567,14 @@ elif mode == "教員用（正解・配点・特殊ルール設定）":
             col_bp1, col_bp2 = st.columns([2, 1])
             bulk_val = col_bp1.number_input("全問の配点を一括変更（点）", min_value=0, max_value=50, value=2, step=1)
             
+            # --- 一括適用処理（修正版：session_stateの各キーへ新配点を直接代入） ---
             if col_bp2.button("全問一括適用", type="secondary"):
                 new_bulk_pts = {f'Q{i}': int(bulk_val) for i in range(1, t_max_q + 1)}
                 save_points_key(target_test_id, new_bulk_pts)
                 
-                for i in range(1, 51):
+                for i in range(1, t_max_q + 1):
                     k = f"pts_{target_test_id}_Q{i}"
-                    if k in st.session_state:
-                        del st.session_state[k]
+                    st.session_state[k] = int(bulk_val)
                 
                 st.success(f"TEST ID [{target_test_id}] の全問配点を {int(bulk_val)} 点に変更しました！")
                 st.rerun()
