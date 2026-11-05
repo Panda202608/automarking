@@ -664,4 +664,49 @@ elif mode == "教員用（集計・Excel出力）":
         st.dataframe(df_display, use_container_width=True)
 
         st.subheader("2. 問題別 正答率 (%)")
-        ref_test_id = selected_test_id if selected_test_id != "すべて"
+        ref_test_id = selected_test_id if selected_test_id != "すべて" else (unique_test_ids[0] if unique_test_ids else "01")
+        ref_t_cfg = load_test_config(ref_test_id)
+        ref_max_q = ref_t_cfg.get("max_questions", MAX_Q)
+        
+        answer_key = load_answer_key(ref_test_id, ref_max_q)
+        q_cols = list(answer_key.keys())
+        correct_cols = [f'{q}_正誤' for q in q_cols if f'{q}_正誤' in df_display.columns]
+        
+        if correct_cols and not df_display.empty:
+            q_acc = (df_display[correct_cols].mean() * 100).to_frame(name="正答率(%)").T
+            q_acc.columns = [col.replace('_正誤', '') for col in correct_cols]
+            st.dataframe(q_acc.style.format("{:.1f}%"), use_container_width=True)
+
+        if selected_test_id == "すべて" and len(unique_test_ids) > 1:
+            st.markdown("---")
+            st.subheader("3. TEST ID 別 統計・比較")
+            test_summary = df.groupby('TEST ID')['合計点'].agg(
+                提出件数='count',
+                平均点='mean',
+                最高点='max',
+                最低点='min'
+            ).reset_index()
+            test_summary['平均点'] = test_summary['平均点'].round(1)
+            st.dataframe(test_summary, use_container_width=True)
+
+        st.markdown("---")
+        excel_filename = f"集計結果_TEST_{selected_test_id}.xlsx"
+        excel_path = f"/tmp/{excel_filename}" if os.path.exists("/tmp") else excel_filename
+        
+        with pd.ExcelWriter(excel_path, engine='openpyxl') as writer:
+            df_display.to_excel(writer, sheet_name='個人別結果', index=False)
+            if correct_cols and not df_display.empty:
+                q_acc.to_excel(writer, sheet_name='問題別正答率')
+            if selected_test_id == "すべて":
+                df.groupby('TEST ID')['合計点'].describe().to_excel(writer, sheet_name='TEST_ID別統計')
+
+        with open(excel_path, "rb") as f:
+            st.download_button(
+                label=f"📥 選択中({selected_test_id})のデータをExcelでダウンロード",
+                data=f,
+                file_name=excel_filename,
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                type="primary"
+            )
+    else:
+        st.warning("まだ採点データが保存されていません。")
