@@ -93,12 +93,19 @@ def safe_read_csv(filepath):
     if not os.path.exists(filepath):
         return pd.DataFrame()
     try:
-        return pd.read_csv(filepath, encoding='utf-8-sig')
+        return pd.read_csv(filepath, encoding='utf-8-sig', dtype={'TEST ID': str, 'STUDENT ID': str})
     except Exception:
         try:
-            return pd.read_csv(filepath, encoding='utf-8-sig', on_bad_lines='skip')
+            return pd.read_csv(filepath, encoding='utf-8-sig', on_bad_lines='skip', dtype={'TEST ID': str, 'STUDENT ID': str})
         except Exception:
             return pd.DataFrame()
+
+def get_clean_unique_test_ids(df):
+    if df.empty or 'TEST ID' not in df.columns:
+        return []
+    clean_series = df['TEST ID'].dropna().astype(str).str.strip().str.replace(r'\.0$', '', regex=True).str.zfill(2)
+    clean_series = clean_series[clean_series != 'NAN']
+    return sorted(list(clean_series.unique()))
 
 def save_test_result_to_csv(row_data):
     df_new = pd.DataFrame([row_data])
@@ -441,7 +448,6 @@ if mode == "生徒用（マーク撮影・採点）":
                 st.session_state.final_student_id = str(student_id_val).zfill(4)
                 st.session_state.final_answers = final_answers
 
-                # --- 確定の瞬間に1回だけ自動採点・CSV保存を実行 ---
                 t_id = st.session_state.final_test_id
                 s_id = st.session_state.final_student_id
                 
@@ -496,10 +502,8 @@ if mode == "生徒用（マーク撮影・採点）":
 
                 row_d['合計点'] = int(t_score)
 
-                # CSVに安全保存
                 save_test_result_to_csv(row_d)
 
-                # 結果表示用データの保持
                 st.session_state.result_total_score = int(t_score)
                 st.session_state.results_list = res_list
                 st.session_state.show_student_stats = False
@@ -536,9 +540,10 @@ if mode == "生徒用（マーク撮影・採点）":
             st.subheader("📊 平均点・全体統計データ")
             
             df_all = safe_read_csv(DATA_FILE)
-            if not df_all.empty and 'TEST ID' in df_all.columns:
-                df_all['TEST ID'] = df_all['TEST ID'].astype(str).str.strip().str.zfill(2)
-                unique_test_ids = sorted(list(df_all['TEST ID'].unique()))
+            unique_test_ids = get_clean_unique_test_ids(df_all)
+            
+            if unique_test_ids:
+                df_all['TEST ID'] = df_all['TEST ID'].astype(str).str.strip().str.replace(r'\.0$', '', regex=True).str.zfill(2)
                 
                 default_idx = unique_test_ids.index(test_id) if test_id in unique_test_ids else 0
                 selected_stat_tid = st.selectbox("📌 表示する TEST ID を選択してください", unique_test_ids, index=default_idx)
@@ -566,7 +571,7 @@ if mode == "生徒用（マーク撮影・採点）":
                         
                         corr_col = f'{q}_正誤'
                         if corr_col in df_test.columns:
-                            acc = df_test[corr_col].mean() * 100
+                            acc = pd.to_numeric(df_test[corr_col], errors='coerce').mean() * 100
                         else:
                             acc = 0.0
 
@@ -825,12 +830,13 @@ elif mode == "教員用（正解・配点・特殊ルール設定）":
 elif mode == "教員用（集計・Excel出力）":
     st.header("■ 教員用 集計ダッシュボード")
     df = safe_read_csv(DATA_FILE)
-    if not df.empty and 'TEST ID' in df.columns:
-        df['TEST ID'] = df['TEST ID'].astype(str).str.strip().str.zfill(2)
+    unique_test_ids = get_clean_unique_test_ids(df)
+    
+    if unique_test_ids:
+        df['TEST ID'] = df['TEST ID'].astype(str).str.strip().str.replace(r'\.0$', '', regex=True).str.zfill(2)
         if 'STUDENT ID' in df.columns:
-            df['STUDENT ID'] = df['STUDENT ID'].astype(str).str.strip().str.zfill(4)
+            df['STUDENT ID'] = df['STUDENT ID'].astype(str).str.strip().str.replace(r'\.0$', '', regex=True).str.zfill(4)
         
-        unique_test_ids = sorted(list(df['TEST ID'].unique()))
         selected_test_id = st.selectbox("📌 集計対象の TEST ID を選択してください", unique_test_ids)
         
         df_display = df[df['TEST ID'] == selected_test_id].copy()
@@ -841,16 +847,17 @@ elif mode == "教員用（集計・Excel出力）":
         ref_t_cfg = load_test_config(selected_test_id)
         ref_total_score = ref_t_cfg.get("total_score", 100)
 
-        # 1. 基本指標
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("提出枚数", f"{len(df_display)} 枚")
+        
+        df_display['合計点'] = pd.to_numeric(df_display['合計点'], errors='coerce')
+        
         m2.metric("全平均点", f"{round(df_display['合計点'].mean(), 1)} 点" if not df_display.empty else "0 点")
         
-        max_score = int(df_display['合計点'].max()) if not df_display.empty else 0
+        max_score = int(df_display['合計点'].max()) if not df_display.empty and not pd.isna(df_display['合計点'].max()) else 0
         m3.metric("最高点", f"{max_score} 点 / {ref_total_score} 点")
-        m4.metric("最低点", f"{int(df_display['合計点'].min())} 点" if not df_display.empty else "0 点")
+        m4.metric("最低点", f"{int(df_display['合計点'].min())} 点" if not df_display.empty and not pd.isna(df_display['合計点'].min()) else "0 点")
 
-        # 最高点取得者のID表示
         if not df_display.empty and max_score > 0:
             top_students = df_display[df_display['合計点'] == max_score]['STUDENT ID'].tolist()
             top_str = ", ".join([str(s).zfill(4) for s in top_students])
@@ -902,9 +909,10 @@ elif mode == "教員用（集計・Excel出力）":
             correct_cols = [f'{q}_正誤' for q in q_cols if f'{q}_正誤' in df_display.columns]
             
             if correct_cols:
-                q_acc = (df_display[correct_cols].mean() * 100).to_frame(name="正答率(%)").T
-                q_acc.columns = [col.replace('_正誤', '') for col in correct_cols]
-                st.dataframe(q_acc.style.format("{:.1f}%"), use_container_width=True)
+                q_acc = df_display[correct_cols].apply(pd.to_numeric, errors='coerce').mean() * 100
+                q_acc_df = q_acc.to_frame(name="正答率(%)").T
+                q_acc_df.columns = [col.replace('_正誤', '') for col in correct_cols]
+                st.dataframe(q_acc_df.style.format("{:.1f}%"), use_container_width=True)
 
             st.markdown("---")
             excel_filename = f"集計結果_TEST_{selected_test_id}.xlsx"
@@ -916,7 +924,7 @@ elif mode == "教員用（集計・Excel出力）":
                 if not low_scorers.empty:
                     low_scorers[['STUDENT ID', 'クラス', '合計点', '得点率(%)']].to_excel(writer, sheet_name='要フォロー生徒', index=False)
                 if correct_cols:
-                    q_acc.to_excel(writer, sheet_name='問題別正答率')
+                    q_acc_df.to_excel(writer, sheet_name='問題別正答率')
 
             with open(excel_path, "rb") as f:
                 st.download_button(
