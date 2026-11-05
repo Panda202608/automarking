@@ -727,7 +727,8 @@ if mode == "📱 生徒用（解答・採点・統計）":
                                 visible=True,
                                 range=[0, 100],
                                 ticksuffix="%",
-                                gridcolor="#cbd5e1"
+                                gridcolor="#cbd5e1",
+                                fixedrange=True
                             ),
                             angularaxis=dict(
                                 gridcolor="#cbd5e1"
@@ -739,7 +740,8 @@ if mode == "📱 生徒用（解答・採点・統計）":
                         paper_bgcolor='rgba(0,0,0,0)',
                         plot_bgcolor='rgba(0,0,0,0)'
                     )
-                    st.plotly_chart(fig, use_container_width=True)
+                    # staticPlot: True でタッチ・クリック操作を完全無効化
+                    st.plotly_chart(fig, use_container_width=True, config={'staticPlot': True})
                     
                 with col_chart2:
                     st.markdown("##### 📝 大問別 得点率一覧")
@@ -901,7 +903,6 @@ elif mode == "教員用（正解・配点・大問・特殊ルール設定）":
             c_name, c_s, c_e = st.columns([2, 1.5, 1.5])
             s_name = c_name.text_input(f"大問{sec_idx+1} 名称", value=default_sec.get("name", f"第{sec_idx+1}問"), key=f"sec_name_{target_test_id}_{sec_idx}")
             
-            # 安全装置付きでデフォルト値を限界値（t_max_q）以内に制限
             def_start = min(int(default_sec.get("start", 1)), t_max_q)
             def_end = min(int(default_sec.get("end", min(5, t_max_q))), t_max_q)
             
@@ -1003,7 +1004,6 @@ elif mode == "教員用（正解・配点・大問・特殊ルール設定）":
             st.caption("※ 順不同で一致すればOKな問（例: 37〜38）と、同時正解が必要な通常の問（例: 39〜39）の組み合わせを設定します。")
             c_u1, c_u2, c_e1, c_e2, c_p = st.columns([1.2, 1.2, 1.2, 1.2, 1.2])
             
-            # min() による安全自動ガード
             us_q = c_u1.number_input("順不同 開始問", min_value=1, max_value=t_max_q, value=min(37, t_max_q), step=1, key="sr_us_q")
             ue_q = c_u2.number_input("順不同 終了問", min_value=1, max_value=t_max_q, value=min(38, t_max_q), step=1, key="sr_ue_q")
             es_q = c_e1.number_input("追加問 開始問", min_value=0, max_value=t_max_q, value=min(39, t_max_q), step=1, key="sr_es_q")
