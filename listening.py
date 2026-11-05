@@ -6,9 +6,12 @@ import cv2
 import numpy as np
 from PIL import Image, ImageOps
 from datetime import datetime
+import plotly.graph_objects as go
+from filelock import FileLock
 
 # --- データ保存用ファイルパス ---
 DATA_FILE = "test_results.csv"
+LOCK_FILE = "test_results.csv.lock"   # 排他ロック用ファイル
 ANSWER_KEY_FILE = "answer_keys.json"   # テストIDごとの正答
 POINTS_KEY_FILE = "points_keys.json"   # テストIDごとの配点
 TEST_CONFIG_FILE = "test_configs.json" # テストIDごとの問題数・合計点
@@ -24,12 +27,10 @@ st.set_page_config(page_title="共通テスト採点・集計システム", layo
 # ---------------------------------------------------------
 st.markdown("""
 <style>
-    /* 全体背景とフォントの設定 */
     .main {
         background-color: #f8fafc;
         font-family: 'Helvetica Neue', Arial, 'Hiragino Kaku Gothic ProN', 'Hiragino Sans', Meiryo, sans-serif;
     }
-    /* ヘッダーのグラデーション */
     .hero-header {
         background: linear-gradient(135deg, #1e3a8a 0%, #3b82f6 100%);
         color: white;
@@ -49,7 +50,6 @@ st.markdown("""
         margin-top: 0.4rem;
         font-size: 0.95rem;
     }
-    /* カードデザイン */
     .custom-card {
         background-color: white;
         border-radius: 12px;
@@ -58,7 +58,6 @@ st.markdown("""
         border: 1px solid #e2e8f0;
         margin-bottom: 1.5rem;
     }
-    /* 大問小計カード */
     .section-score-card {
         background: linear-gradient(135deg, #f0f9ff 0%, #e0f2fe 100%);
         border-left: 5px solid #0284c7;
@@ -178,17 +177,21 @@ def get_clean_unique_test_ids(df):
     clean_series = clean_series[clean_series != 'NAN']
     return sorted(list(clean_series.unique()))
 
+# --- 同時書き込み防止（排他ロック付き保存処理） ---
 def save_test_result_to_csv(row_data):
     df_new = pd.DataFrame([row_data])
-    if os.path.exists(DATA_FILE):
-        df_existing = safe_read_csv(DATA_FILE)
-        if not df_existing.empty:
-            df_all = pd.concat([df_existing, df_new], ignore_index=True)
+    lock = FileLock(LOCK_FILE, timeout=10)  # 最大10秒間、他者の保存完了を待ち受ける
+    
+    with lock:
+        if os.path.exists(DATA_FILE):
+            df_existing = safe_read_csv(DATA_FILE)
+            if not df_existing.empty:
+                df_all = pd.concat([df_existing, df_new], ignore_index=True)
+            else:
+                df_all = df_new
         else:
             df_all = df_new
-    else:
-        df_all = df_new
-    df_all.to_csv(DATA_FILE, index=False, encoding='utf-8-sig')
+        df_all.to_csv(DATA_FILE, index=False, encoding='utf-8-sig')
 
 # ---------------------------------------------------------
 # 12個マーカー分離アルゴリズム
@@ -359,19 +362,27 @@ def analyze_mark_sheet(image_file, max_q=50, num_opts=9):
                         cnt = cv2.countNonZero(roi)
                         counts.append(cnt)
                         boxes.append((x1, y1, x2, y2))
-                        cv2.rectangle(debug_img, (x1, y1), (x2, y2), (0, 0, 255), 1)
+                        cv2.rectangle(debug_img, (x1, y1), (x2, y2), (200, 200, 200), 1)
 
-                    best_opt = "未マーク/無効"
-                    if counts:
-                        max_c = max(counts)
-                        avg_c = (sum(counts) - max_c) / float(len(counts) - 1) if len(counts) > 1 else 0
-                        max_idx = counts.index(max_c)
-                        
-                        if max_c > 30 and max_c > (avg_c * 1.7 + 10):
-                            best_opt = max_idx + 1
-                            cv2.rectangle(debug_img, (boxes[max_idx][0], boxes[max_idx][1]), 
-                                                     (boxes[max_idx][2], boxes[max_idx][3]), (0, 255, 0), -1)
-                            
+                    valid_opts = []
+                    for opt_idx, cnt in enumerate(counts):
+                        others = [c for j, c in enumerate(counts) if j != opt_idx]
+                        avg_other = sum(others) / float(len(others)) if others else 0
+                        if cnt > 30 and cnt > (avg_other * 1.6 + 10):
+                            valid_opts.append(opt_idx + 1)
+
+                    if len(valid_opts) == 1:
+                        best_opt = valid_opts[0]
+                        idx = valid_opts[0] - 1
+                        cv2.rectangle(debug_img, (boxes[idx][0], boxes[idx][1]), (boxes[idx][2], boxes[idx][3]), (0, 255, 0), -1)
+                    elif len(valid_opts) >= 2:
+                        best_opt = "重複マーク"
+                        for opt_num in valid_opts:
+                            idx = opt_num - 1
+                            cv2.rectangle(debug_img, (boxes[idx][0], boxes[idx][1]), (boxes[idx][2], boxes[idx][3]), (0, 0, 255), -1)
+                    else:
+                        best_opt = "未マーク/無効"
+
                     recognized_answers[q_key] = best_opt
                 return debug_img
 
@@ -423,7 +434,6 @@ if mode in ["教員用（正解・配点・大問・特殊ルール設定）", "
     st.markdown("---")
 
 if mode == "📱 生徒用（解答・採点・統計）":
-    # 生徒用ヘッダーデザイン
     st.markdown("""
     <div class="hero-header">
         <h1>✨ 共通テスト演習 自動採点・統計ポータル</h1>
@@ -492,7 +502,7 @@ if mode == "📱 生徒用（解答・採点・統計）":
             current_test_max_q = t_cfg.get("max_questions", MAX_Q)
 
             st.markdown("---")
-            options = list(range(1, NUM_OPTS + 1)) + ["未マーク/無効"]
+            options = list(range(1, NUM_OPTS + 1)) + ["未マーク/無効", "重複マーク"]
             final_answers = {}
 
             col_left, col_right = st.columns(2)
@@ -501,7 +511,7 @@ if mode == "📱 生徒用（解答・採点・統計）":
                 for i in range(1, min(26, current_test_max_q + 1)):
                     q_key = f'Q{i}'
                     curr = st.session_state.recognized_answers.get(q_key, "未マーク/無効")
-                    idx = options.index(curr) if curr in options else len(options) - 1
+                    idx = options.index(curr) if curr in options else len(options) - 2
                     q_c1, q_c2 = st.columns([1, 2])
                     q_c1.write(f"**問 {i}**")
                     final_answers[q_key] = q_c2.selectbox(f"問{i}", options=options, index=idx, key=f"sel_{q_key}", label_visibility="collapsed")
@@ -511,7 +521,7 @@ if mode == "📱 生徒用（解答・採点・統計）":
                     for i in range(26, current_test_max_q + 1):
                         q_key = f'Q{i}'
                         curr = st.session_state.recognized_answers.get(q_key, "未マーク/無効")
-                        idx = options.index(curr) if curr in options else len(options) - 1
+                        idx = options.index(curr) if curr in options else len(options) - 2
                         q_c1, q_c2 = st.columns([1, 2])
                         q_c1.write(f"**問 {i}**")
                         final_answers[q_key] = q_c2.selectbox(f"問{i}", options=options, index=idx, key=f"sel_{q_key}", label_visibility="collapsed")
@@ -541,18 +551,46 @@ if mode == "📱 生徒用（解答・採点・統計）":
 
                     spec_q_map = {}
                     for r in spec_rules_calc:
-                        for q_num in range(r["start"], r["end"] + 1):
-                            spec_q_map[f'Q{q_num}'] = r
+                        r_type = r.get("type", "range")
+                        if r_type == "range":
+                            for q_num in range(r.get("start", 1), r.get("end", 1) + 1):
+                                spec_q_map[f'Q{q_num}'] = r
+                        elif r_type == "unordered_combo":
+                            for q_num in range(r.get("unordered_start", 1), r.get("unordered_end", 1) + 1):
+                                spec_q_map[f'Q{q_num}'] = r
+                            if r.get("extra_start", 0) > 0 and r.get("extra_end", 0) > 0:
+                                for q_num in range(r.get("extra_start", 1), r.get("extra_end", 1) + 1):
+                                    spec_q_map[f'Q{q_num}'] = r
 
                     rule_res = []
                     for r in spec_rules_calc:
-                        all_c = True
-                        for q_num in range(r["start"], r["end"] + 1):
-                            q = f'Q{q_num}'
-                            if final_answers.get(q) != ans_key_calc.get(q):
-                                all_c = False
-                                break
-                        rule_res.append({"rule": r, "is_achieved": all_c})
+                        r_type = r.get("type", "range")
+                        if r_type == "range":
+                            all_c = True
+                            for q_num in range(r["start"], r["end"] + 1):
+                                q = f'Q{q_num}'
+                                if final_answers.get(q) != ans_key_calc.get(q):
+                                    all_c = False
+                                    break
+                            rule_res.append({"rule": r, "is_achieved": all_c})
+                        elif r_type == "unordered_combo":
+                            u_start, u_end = r.get("unordered_start", 1), r.get("unordered_end", 1)
+                            e_start, e_end = r.get("extra_start", 0), r.get("extra_end", 0)
+                            
+                            u_user = [final_answers.get(f'Q{i}') for i in range(u_start, u_end + 1)]
+                            u_correct = [ans_key_calc.get(f'Q{i}') for i in range(u_start, u_end + 1)]
+                            
+                            u_ok = (sorted([str(x) for x in u_user]) == sorted([str(x) for x in u_correct]))
+                            
+                            e_ok = True
+                            if e_start > 0 and e_end > 0:
+                                for i in range(e_start, e_end + 1):
+                                    if final_answers.get(f'Q{i}') != ans_key_calc.get(f'Q{i}'):
+                                        e_ok = False
+                                        break
+                            
+                            all_c = u_ok and e_ok
+                            rule_res.append({"rule": r, "is_achieved": all_c})
 
                     t_score = 0
                     res_list = []
@@ -568,8 +606,8 @@ if mode == "📱 生徒用（解答・採点・統計）":
                         u_a = final_answers.get(q)
                         c_a = ans_key_calc.get(q)
                         pts = pts_key_calc.get(q, 2)
-                        is_c = (u_a == c_a)
                         
+                        is_c = (u_a == c_a)
                         sc = 0 if q in spec_q_map else (pts if is_c else 0)
                         status = "〇" if is_c else "✕"
 
@@ -585,7 +623,6 @@ if mode == "📱 生徒用（解答・採点・統計）":
 
                     row_d['合計点'] = int(t_score)
 
-                    # --- 大問ごとの小計と満点の計算 ---
                     section_summary = []
                     if sections_config:
                         for sec in sections_config:
@@ -602,21 +639,31 @@ if mode == "📱 生徒用（解答・採点・統計）":
                                 if q_k not in spec_q_map:
                                     sec_max_pts += pts_key_calc.get(q_k, 2)
                             
-                            # 特殊ルールが大問内に入っている場合
                             for rr in rule_res:
                                 r = rr["rule"]
-                                if r["start"] >= s_start and r["end"] <= s_end:
+                                r_type = r.get("type", "range")
+                                if r_type == "range":
+                                    r_s, r_e = r["start"], r["end"]
+                                elif r_type == "unordered_combo":
+                                    r_s = r.get("unordered_start", 1)
+                                    r_e = max(r.get("unordered_end", 1), r.get("extra_end", 0))
+                                
+                                if r_s >= s_start and r_e <= s_end:
                                     sec_max_pts += r["points"]
                                     if rr["is_achieved"]:
                                         sec_score += r["points"]
+
+                            sec_rate = round((sec_score / sec_max_pts * 100), 1) if sec_max_pts > 0 else 0.0
 
                             section_summary.append({
                                 "name": s_name,
                                 "range": f"問{s_start}〜問{s_end}",
                                 "score": sec_score,
-                                "max_score": sec_max_pts
+                                "max_score": sec_max_pts,
+                                "rate": sec_rate
                             })
 
+                    # 排他ロック付き保存処理を呼出し
                     save_test_result_to_csv(row_d)
 
                     st.session_state.result_total_score = int(t_score)
@@ -638,10 +685,8 @@ if mode == "📱 生徒用（解答・採点・統計）":
 
             st.balloons()
             
-            # --- 総合得点表示 ---
             st.metric(label=f"【TEST ID: {test_id} / STUDENT ID: {student_id}】 さんの総合点", value=f"{total_score} 点 / {target_total} 点")
 
-            # --- 大問別の小計表示 ---
             if section_summary:
                 st.markdown("##### 📚 大問別 得点内訳（小計）")
                 cols = st.columns(min(len(section_summary), 4))
@@ -651,10 +696,60 @@ if mode == "📱 生徒用（解答・採点・統計）":
                         st.markdown(f"""
                         <div class="section-score-card">
                             <div class="section-score-title">{sec['name']} ({sec['range']})</div>
-                            <div class="section-score-val">{sec['score']} / {sec['max_score']} 点</div>
+                            <div class="section-score-val">{sec['score']} / {sec['max_score']} 点 ({sec['rate']}%)</div>
                         </div>
                         """, unsafe_allow_html=True)
-            
+                
+                st.markdown("---")
+                col_chart1, col_chart2 = st.columns([1.2, 1])
+                
+                with col_chart1:
+                    st.markdown("##### 📈 大問別 得点率バランス（レーダーチャート）")
+                    categories = [sec['name'] for sec in section_summary]
+                    rates = [sec['rate'] for sec in section_summary]
+                    
+                    categories_closed = categories + [categories[0]]
+                    rates_closed = rates + [rates[0]]
+                    
+                    fig = go.Figure()
+                    fig.add_trace(go.Scatterpolar(
+                        r=rates_closed,
+                        theta=categories_closed,
+                        fill='toself',
+                        fillcolor='rgba(59, 130, 246, 0.25)',
+                        line=dict(color='#1e3a8a', width=3),
+                        marker=dict(size=7, color='#3b82f6'),
+                        name='得点率'
+                    ))
+                    
+                    fig.update_layout(
+                        polar=dict(
+                            radialaxis=dict(
+                                visible=True,
+                                range=[0, 100],
+                                ticksuffix="%",
+                                gridcolor="#cbd5e1"
+                            ),
+                            angularaxis=dict(
+                                gridcolor="#cbd5e1"
+                            )
+                        ),
+                        showlegend=False,
+                        margin=dict(l=50, r=50, t=30, b=30),
+                        height=360,
+                        paper_bgcolor='rgba(0,0,0,0)',
+                        plot_bgcolor='rgba(0,0,0,0)'
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+                    
+                with col_chart2:
+                    st.markdown("##### 📝 大問別 得点率一覧")
+                    rate_df = pd.DataFrame([
+                        {"大問": sec['name'], "範囲": sec['range'], "得点": f"{sec['score']} / {sec['max_score']} 点", "得点率": f"{sec['rate']}%"}
+                        for sec in section_summary
+                    ])
+                    st.dataframe(rate_df, use_container_width=True, height=280)
+
             st.markdown("---")
             st.write("**【設問別 正誤一覧】**")
             st.dataframe(pd.DataFrame(results_list), height=350, use_container_width=True)
@@ -664,7 +759,6 @@ if mode == "📱 生徒用（解答・採点・統計）":
                 st.session_state.step = 1
                 st.rerun()
 
-    # --- タブ2: マークシート不要で統計が見られる生徒用統計画面 ---
     with tab_student_2:
         st.subheader("📊 テスト別 統計・正答率の確認")
         st.caption("※ マークシートを撮影しなくても、TEST IDを選ぶだけで全体の平均点や問題ごとの正答率を確認できます。")
@@ -792,10 +886,9 @@ elif mode == "教員用（正解・配点・大問・特殊ルール設定）":
             st.success(f"TEST ID [{target_test_id}] の基本設定を保存しました！（全 {new_max_q_val} 問 / {new_total_score_val} 点満点）")
             st.rerun()
 
-        # --- 新機能: 大問の区切り（セクション）設定 ---
         st.markdown("---")
         st.markdown("##### 📚 2. 大問の区切り（セクション）設定")
-        st.caption("※「第1問: 問1〜6」「第2問: 問7〜14」のように区切ると、生徒の採点結果画面に大問別の小計が表示されます。")
+        st.caption("※「第1問: 問1〜6」「第2問: 問7〜14」のように区切ると、生徒の採点結果画面に大問別の小計とレーダーチャートが表示されます。")
         
         existing_sections = load_sections_config(target_test_id)
         
@@ -825,10 +918,19 @@ elif mode == "教員用（正解・配点・大問・特殊ルール設定）":
         current_points = load_points_key(target_test_id, t_max_q)
         
         current_rules = load_special_rules(target_test_id)
+        
         special_q_set = set()
         for r in current_rules:
-            for q_num in range(r["start"], r["end"] + 1):
-                special_q_set.add(q_num)
+            r_type = r.get("type", "range")
+            if r_type == "range":
+                for q_num in range(r.get("start", 1), r.get("end", 1) + 1):
+                    special_q_set.add(q_num)
+            elif r_type == "unordered_combo":
+                for q_num in range(r.get("unordered_start", 1), r.get("unordered_end", 1) + 1):
+                    special_q_set.add(q_num)
+                if r.get("extra_start", 0) > 0 and r.get("extra_end", 0) > 0:
+                    for q_num in range(r.get("extra_start", 1), r.get("extra_end", 1) + 1):
+                        special_q_set.add(q_num)
 
         st.markdown("###### 💡 配点の一括変更")
         
@@ -870,29 +972,69 @@ elif mode == "教員用（正解・配点・大問・特殊ルール設定）":
 
         st.markdown("---")
         st.markdown("##### 🎯 4. 特殊配点（完答ルール）の設定")
-        st.caption("※「問18〜問21まですべて正解で4点」などの完答ルールを設定できます。対象となった設問の個別配点欄は自動的に非表示（🔒 完答ルール対象）となります。")
+        
+        rule_type_sel = st.radio(
+            "追加する完答ルールのタイプを選択してください",
+            ["通常完答 (例: 問18〜問21がすべて正解で4点)", "順不同＋指定問 完答 (例: 問37・38が順不同＋問39も正解で5点)"],
+            key="rule_type_radio"
+        )
 
-        col_sr1, col_sr2, col_sr3, col_sr4 = st.columns([1.5, 1.5, 1.5, 1.5])
-        s_q = col_sr1.number_input("完答 開始問", min_value=1, max_value=t_max_q, value=18, step=1, key="sr_start_q")
-        e_q = col_sr2.number_input("完答 終了問", min_value=1, max_value=t_max_q, value=min(21, t_max_q), step=1, key="sr_end_q")
-        r_pts = col_sr3.number_input("完答時 得点", min_value=1, max_value=50, value=4, step=1, key="sr_pts")
+        if "通常完答" in rule_type_sel:
+            col_sr1, col_sr2, col_sr3, col_sr4 = st.columns([1.5, 1.5, 1.5, 1.5])
+            s_q = col_sr1.number_input("完答 開始問", min_value=1, max_value=t_max_q, value=18, step=1, key="sr_start_q")
+            e_q = col_sr2.number_input("完答 終了問", min_value=1, max_value=t_max_q, value=min(21, t_max_q), step=1, key="sr_end_q")
+            r_pts = col_sr3.number_input("完答時 得点", min_value=1, max_value=50, value=4, step=1, key="sr_pts")
 
-        if col_sr4.button("特殊ルールを追加", type="secondary"):
-            if s_q > e_q:
-                st.error("開始問は終了問以下に設定してください。")
-            else:
-                new_rule = {"start": int(s_q), "end": int(e_q), "points": int(r_pts)}
-                if new_rule not in current_rules:
-                    current_rules.append(new_rule)
-                    save_special_rules(target_test_id, current_rules)
-                    st.success(f"問{s_q}〜問{e_q}（完答 {r_pts}点）のルールを追加しました！")
-                    st.rerun()
+            if col_sr4.button("通常ルールを追加", type="secondary"):
+                if s_q > e_q:
+                    st.error("開始問は終了問以下に設定してください。")
+                else:
+                    new_rule = {"type": "range", "start": int(s_q), "end": int(e_q), "points": int(r_pts)}
+                    if new_rule not in current_rules:
+                        current_rules.append(new_rule)
+                        save_special_rules(target_test_id, current_rules)
+                        st.success(f"問{s_q}〜問{e_q}（完答 {r_pts}点）のルールを追加しました！")
+                        st.rerun()
+        else:
+            st.caption("※ 順不同で一致すればOKな問（例: 37〜38）と、同時正解が必要な通常の問（例: 39〜39）の組み合わせを設定します。")
+            c_u1, c_u2, c_e1, c_e2, c_p = st.columns([1.2, 1.2, 1.2, 1.2, 1.2])
+            us_q = c_u1.number_input("順不同 開始問", min_value=1, max_value=t_max_q, value=37, step=1, key="sr_us_q")
+            ue_q = c_u2.number_input("順不同 終了問", min_value=1, max_value=t_max_q, value=38, step=1, key="sr_ue_q")
+            es_q = c_e1.number_input("追加問 開始問", min_value=0, max_value=t_max_q, value=39, step=1, key="sr_es_q")
+            ee_q = c_e2.number_input("追加問 終了問", min_value=0, max_value=t_max_q, value=39, step=1, key="sr_ee_q")
+            r_pts = c_p.number_input("完答時 得点", min_value=1, max_value=50, value=5, step=1, key="sr_pts_u")
+
+            if st.button("順不同ルールを追加", type="secondary"):
+                if us_q > ue_q:
+                    st.error("順不同の開始問は終了問以下に設定してください。")
+                elif es_q > 0 and ee_q > 0 and es_q > ee_q:
+                    st.error("追加問の開始問は終了問以下に設定してください。")
+                else:
+                    new_rule = {
+                        "type": "unordered_combo",
+                        "unordered_start": int(us_q),
+                        "unordered_end": int(ue_q),
+                        "extra_start": int(es_q),
+                        "extra_end": int(ee_q),
+                        "points": int(r_pts)
+                    }
+                    if new_rule not in current_rules:
+                        current_rules.append(new_rule)
+                        save_special_rules(target_test_id, current_rules)
+                        st.success(f"問{us_q}〜問{ue_q}（順不同）＋ 問{es_q}〜問{ee_q}（完答 {r_pts}点）を追加しました！")
+                        st.rerun()
 
         if current_rules:
             st.write("**登録済みの特殊ルール一覧:**")
             for idx, r in enumerate(current_rules):
+                r_type = r.get("type", "range")
                 col_list1, col_list2 = st.columns([4, 1])
-                col_list1.write(f"・ **問 {r['start']} 〜 問 {r['end']}** ： 全問正解で **{r['points']} 点**")
+                if r_type == "range":
+                    col_list1.write(f"・ **問 {r['start']} 〜 問 {r['end']}** ： 全問正解で **{r['points']} 点**")
+                elif r_type == "unordered_combo":
+                    e_str = f" ＋ **問 {r['extra_start']} 〜 問 {r['extra_end']}**" if r.get("extra_start", 0) > 0 else ""
+                    col_list1.write(f"・ **問 {r['unordered_start']} 〜 問 {r['unordered_end']} (順不同)**{e_str} ： 全正解で **{r['points']} 点**")
+
                 if col_list2.button("削除", key=f"del_rule_{idx}"):
                     current_rules.pop(idx)
                     save_special_rules(target_test_id, current_rules)
@@ -944,7 +1086,6 @@ elif mode == "教員用（正解・配点・大問・特殊ルール設定）":
                         init_pt = int(st.session_state.get(f"pts_{target_test_id}_{q_k}", current_points.get(q_k, 2)))
                         new_points[q_k] = q_c3.number_input(f"配点_問{i}", min_value=0, max_value=50, value=init_pt, step=1, key=f"pts_{target_test_id}_{q_k}", label_visibility="collapsed")
 
-        # --- 配点の合計チェック ---
         calculated_total = sum(new_points.values()) + sum(r["points"] for r in current_rules)
 
         st.markdown("---")
@@ -978,7 +1119,6 @@ elif mode == "教員用（集計・Excel出力）":
         
         df_display = df[df['TEST ID'] == selected_test_id].copy()
 
-        # --- Student IDの昇順にソート ---
         if 'STUDENT ID' in df_display.columns:
             df_display = df_display.sort_values(by='STUDENT ID').reset_index(drop=True)
 
@@ -1044,7 +1184,6 @@ elif mode == "教員用（集計・Excel出力）":
             st.subheader("1. 個人別解答・得点一覧 (Student ID 順)")
             st.dataframe(df_display.drop(columns=['クラス', '得点率(%)'], errors='ignore'), use_container_width=True)
 
-            # --- 🗑️ 不要データの削除機能 ---
             st.markdown("---")
             st.subheader("🗑️ 不要データの削除（重複・誤入力データの削除）")
             with st.expander("⚠️ データ削除メニューを開く（クリックで展開）"):
@@ -1068,8 +1207,11 @@ elif mode == "教員用（集計・Excel出力）":
                             for item in selected_items_to_delete
                         ]
                         
-                        df_updated = df.drop(index=indices_to_delete).reset_index(drop=True)
-                        df_updated.to_csv(DATA_FILE, index=False, encoding='utf-8-sig')
+                        # 削除時も排他ロックを適用
+                        lock = FileLock(LOCK_FILE, timeout=10)
+                        with lock:
+                            df_updated = df.drop(index=indices_to_delete).reset_index(drop=True)
+                            df_updated.to_csv(DATA_FILE, index=False, encoding='utf-8-sig')
                         
                         st.success(f"{len(indices_to_delete)} 件のデータを正常に削除しました！")
                         st.rerun()
