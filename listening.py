@@ -727,8 +727,7 @@ if mode == "📱 生徒用（解答・採点・統計）":
                                 visible=True,
                                 range=[0, 100],
                                 ticksuffix="%",
-                                gridcolor="#cbd5e1",
-                                fixedrange=True
+                                gridcolor="#cbd5e1"
                             ),
                             angularaxis=dict(
                                 gridcolor="#cbd5e1"
@@ -740,7 +739,7 @@ if mode == "📱 生徒用（解答・採点・統計）":
                         paper_bgcolor='rgba(0,0,0,0)',
                         plot_bgcolor='rgba(0,0,0,0)'
                     )
-                    # staticPlot: True でタッチ・クリック操作を完全無効化
+                    # staticPlot: True でタッチ・クリック操作を完全無効化（表示崩れを防止）
                     st.plotly_chart(fig, use_container_width=True, config={'staticPlot': True})
                     
                 with col_chart2:
