@@ -180,7 +180,7 @@ def get_clean_unique_test_ids(df):
 # --- 同時書き込み防止（排他ロック付き保存処理） ---
 def save_test_result_to_csv(row_data):
     df_new = pd.DataFrame([row_data])
-    lock = FileLock(LOCK_FILE, timeout=10)  # 最大10秒間、他者の保存完了を待ち受ける
+    lock = FileLock(LOCK_FILE, timeout=10)
     
     with lock:
         if os.path.exists(DATA_FILE):
@@ -663,7 +663,6 @@ if mode == "📱 生徒用（解答・採点・統計）":
                                 "rate": sec_rate
                             })
 
-                    # 排他ロック付き保存処理を呼出し
                     save_test_result_to_csv(row_d)
 
                     st.session_state.result_total_score = int(t_score)
@@ -901,8 +900,13 @@ elif mode == "教員用（正解・配点・大問・特殊ルール設定）":
             
             c_name, c_s, c_e = st.columns([2, 1.5, 1.5])
             s_name = c_name.text_input(f"大問{sec_idx+1} 名称", value=default_sec.get("name", f"第{sec_idx+1}問"), key=f"sec_name_{target_test_id}_{sec_idx}")
-            s_start = c_s.number_input(f"開始問", min_value=1, max_value=t_max_q, value=int(default_sec.get("start", 1)), step=1, key=f"sec_start_{target_test_id}_{sec_idx}")
-            s_end = c_e.number_input(f"終了問", min_value=1, max_value=t_max_q, value=int(default_sec.get("end", min(5, t_max_q))), step=1, key=f"sec_end_{target_test_id}_{sec_idx}")
+            
+            # 安全装置付きでデフォルト値を限界値（t_max_q）以内に制限
+            def_start = min(int(default_sec.get("start", 1)), t_max_q)
+            def_end = min(int(default_sec.get("end", min(5, t_max_q))), t_max_q)
+            
+            s_start = c_s.number_input(f"開始問", min_value=1, max_value=t_max_q, value=max(1, def_start), step=1, key=f"sec_start_{target_test_id}_{sec_idx}")
+            s_end = c_e.number_input(f"終了問", min_value=1, max_value=t_max_q, value=max(1, def_end), step=1, key=f"sec_end_{target_test_id}_{sec_idx}")
             
             new_sections_list.append({"name": s_name, "start": int(s_start), "end": int(s_end)})
 
@@ -981,7 +985,7 @@ elif mode == "教員用（正解・配点・大問・特殊ルール設定）":
 
         if "通常完答" in rule_type_sel:
             col_sr1, col_sr2, col_sr3, col_sr4 = st.columns([1.5, 1.5, 1.5, 1.5])
-            s_q = col_sr1.number_input("完答 開始問", min_value=1, max_value=t_max_q, value=18, step=1, key="sr_start_q")
+            s_q = col_sr1.number_input("完答 開始問", min_value=1, max_value=t_max_q, value=min(18, t_max_q), step=1, key="sr_start_q")
             e_q = col_sr2.number_input("完答 終了問", min_value=1, max_value=t_max_q, value=min(21, t_max_q), step=1, key="sr_end_q")
             r_pts = col_sr3.number_input("完答時 得点", min_value=1, max_value=50, value=4, step=1, key="sr_pts")
 
@@ -998,10 +1002,12 @@ elif mode == "教員用（正解・配点・大問・特殊ルール設定）":
         else:
             st.caption("※ 順不同で一致すればOKな問（例: 37〜38）と、同時正解が必要な通常の問（例: 39〜39）の組み合わせを設定します。")
             c_u1, c_u2, c_e1, c_e2, c_p = st.columns([1.2, 1.2, 1.2, 1.2, 1.2])
-            us_q = c_u1.number_input("順不同 開始問", min_value=1, max_value=t_max_q, value=37, step=1, key="sr_us_q")
-            ue_q = c_u2.number_input("順不同 終了問", min_value=1, max_value=t_max_q, value=38, step=1, key="sr_ue_q")
-            es_q = c_e1.number_input("追加問 開始問", min_value=0, max_value=t_max_q, value=39, step=1, key="sr_es_q")
-            ee_q = c_e2.number_input("追加問 終了問", min_value=0, max_value=t_max_q, value=39, step=1, key="sr_ee_q")
+            
+            # min() による安全自動ガード
+            us_q = c_u1.number_input("順不同 開始問", min_value=1, max_value=t_max_q, value=min(37, t_max_q), step=1, key="sr_us_q")
+            ue_q = c_u2.number_input("順不同 終了問", min_value=1, max_value=t_max_q, value=min(38, t_max_q), step=1, key="sr_ue_q")
+            es_q = c_e1.number_input("追加問 開始問", min_value=0, max_value=t_max_q, value=min(39, t_max_q), step=1, key="sr_es_q")
+            ee_q = c_e2.number_input("追加問 終了問", min_value=0, max_value=t_max_q, value=min(39, t_max_q), step=1, key="sr_ee_q")
             r_pts = c_p.number_input("完答時 得点", min_value=1, max_value=50, value=5, step=1, key="sr_pts_u")
 
             if st.button("順不同ルールを追加", type="secondary"):
@@ -1207,7 +1213,6 @@ elif mode == "教員用（集計・Excel出力）":
                             for item in selected_items_to_delete
                         ]
                         
-                        # 削除時も排他ロックを適用
                         lock = FileLock(LOCK_FILE, timeout=10)
                         with lock:
                             df_updated = df.drop(index=indices_to_delete).reset_index(drop=True)
