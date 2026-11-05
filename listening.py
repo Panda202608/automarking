@@ -13,11 +13,71 @@ ANSWER_KEY_FILE = "answer_keys.json"   # テストIDごとの正答
 POINTS_KEY_FILE = "points_keys.json"   # テストIDごとの配点
 TEST_CONFIG_FILE = "test_configs.json" # テストIDごとの問題数・合計点
 RULES_KEY_FILE = "special_rules.json"  # テストIDごとの特殊配点ルール
+SECTIONS_KEY_FILE = "sections_keys.json" # テストIDごとの大問設定
 CONFIG_FILE = "config.json"
 PASSWORD_FILE = "password.json"
 
 st.set_page_config(page_title="共通テスト採点・集計システム", layout="wide")
-st.title("共通テスト演習 自動採点・集計システム")
+
+# ---------------------------------------------------------
+# カスタムCSS（生徒画面・UIデザイン改善）
+# ---------------------------------------------------------
+st.markdown("""
+<style>
+    /* 全体背景とフォントの設定 */
+    .main {
+        background-color: #f8fafc;
+        font-family: 'Helvetica Neue', Arial, 'Hiragino Kaku Gothic ProN', 'Hiragino Sans', Meiryo, sans-serif;
+    }
+    /* ヘッダーのグラデーション */
+    .hero-header {
+        background: linear-gradient(135deg, #1e3a8a 0%, #3b82f6 100%);
+        color: white;
+        padding: 1.8rem 2rem;
+        border-radius: 16px;
+        margin-bottom: 2rem;
+        box-shadow: 0 10px 15px -3px rgba(30, 58, 138, 0.2);
+    }
+    .hero-header h1 {
+        color: white !important;
+        font-size: 1.8rem;
+        font-weight: 700;
+        margin: 0;
+    }
+    .hero-header p {
+        color: #e0f2fe;
+        margin-top: 0.4rem;
+        font-size: 0.95rem;
+    }
+    /* カードデザイン */
+    .custom-card {
+        background-color: white;
+        border-radius: 12px;
+        padding: 1.5rem;
+        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -1px rgba(0, 0, 0, 0.03);
+        border: 1px solid #e2e8f0;
+        margin-bottom: 1.5rem;
+    }
+    /* 大問小計カード */
+    .section-score-card {
+        background: linear-gradient(135deg, #f0f9ff 0%, #e0f2fe 100%);
+        border-left: 5px solid #0284c7;
+        border-radius: 8px;
+        padding: 1rem 1.2rem;
+        margin-bottom: 0.8rem;
+    }
+    .section-score-title {
+        font-size: 0.9rem;
+        font-weight: 600;
+        color: #0369a1;
+    }
+    .section-score-val {
+        font-size: 1.4rem;
+        font-weight: 700;
+        color: #0c4a6e;
+    }
+</style>
+""", unsafe_allow_html=True)
 
 # ---------------------------------------------------------
 # 設定・データ管理関数
@@ -53,6 +113,17 @@ def save_test_config(test_id, max_q, total_score):
     t_key = str(test_id).zfill(2)
     data[t_key] = {"max_questions": int(max_q), "total_score": int(total_score)}
     save_json_file(TEST_CONFIG_FILE, data)
+
+def load_sections_config(test_id):
+    data = load_json_file(SECTIONS_KEY_FILE, {})
+    t_key = str(test_id).zfill(2)
+    return data.get(t_key, [])
+
+def save_sections_config(test_id, sections_list):
+    data = load_json_file(SECTIONS_KEY_FILE, {})
+    t_key = str(test_id).zfill(2)
+    data[t_key] = sections_list
+    save_json_file(SECTIONS_KEY_FILE, data)
 
 def load_answer_key(test_id, max_q):
     data = load_json_file(ANSWER_KEY_FILE, {})
@@ -334,12 +405,12 @@ teacher_password = load_password()
 
 if "step" not in st.session_state: st.session_state.step = 1
 
-mode = st.sidebar.radio("モード選択", ["生徒用（マーク撮影・採点）", "教員用（正解・配点・特殊ルール設定）", "教員用（集計・Excel出力）"])
+mode = st.sidebar.radio("モード選択", ["📱 生徒用（解答・採点・統計）", "教員用（正解・配点・大問・特殊ルール設定）", "教員用（集計・Excel出力）"])
 
 # ---------------------------------------------------------
 # 教員用モード パスワード認証
 # ---------------------------------------------------------
-if mode in ["教員用（正解・配点・特殊ルール設定）", "教員用（集計・Excel出力）"]:
+if mode in ["教員用（正解・配点・大問・特殊ルール設定）", "教員用（集計・Excel出力）"]:
     st.subheader("🔒 教員用認証")
     input_pass = st.text_input("教員用パスワードを入力してください", type="password")
     if input_pass != teacher_password:
@@ -351,265 +422,304 @@ if mode in ["教員用（正解・配点・特殊ルール設定）", "教員用
     st.success("認証に成功しました。")
     st.markdown("---")
 
-if mode == "生徒用（マーク撮影・採点）":
-    st.header("■ 生徒用 マークシート送信・採点")
+if mode == "📱 生徒用（解答・採点・統計）":
+    # 生徒用ヘッダーデザイン
+    st.markdown("""
+    <div class="hero-header">
+        <h1>✨ 共通テスト演習 自動採点・統計ポータル</h1>
+        <p>マークシートの撮影・自動採点や、テストごとの平均点・正答率を確認できます。</p>
+    </div>
+    """, unsafe_allow_html=True)
 
-    if st.session_state.step == 1:
-        st.subheader("STEP 1: マークシートの撮影・選択")
-        st.info("📱 下の枠をタップして「撮影」を選ぶと、スマホ・タブレットの外カメラが起動します。")
-        
-        uploaded_file = st.file_uploader("撮影するか、マークシート画像を選択してください", type=["jpg", "jpeg", "png"])
-        
-        if uploaded_file is not None:
-            st.image(uploaded_file, caption="選択した画像", width=450)
-            if st.button("この画像を解析して進む ▶", type="primary", use_container_width=True):
-                with st.spinner("マークを自動読み取り中..."):
-                    test_id, exam_id, answers, debug_main, img_exam, img_q1, img_q2, logs = analyze_mark_sheet(uploaded_file, MAX_Q, NUM_OPTS)
-                    st.session_state.uploaded_image = uploaded_file
-                    st.session_state.recognized_test_id = test_id
-                    st.session_state.recognized_exam_id = exam_id
-                    st.session_state.recognized_answers = answers
-                    st.session_state.debug_main = debug_main
-                    st.session_state.img_exam = img_exam
-                    st.session_state.img_q1 = img_q1
-                    st.session_state.img_q2 = img_q2
-                    st.session_state.logs = logs
-                    st.session_state.step = 2
+    tab_student_1, tab_student_2 = st.tabs(["📷 マークシートの撮影・採点", "📊 テスト統計・正答率の確認"])
+
+    with tab_student_1:
+        if st.session_state.step == 1:
+            st.subheader("STEP 1: マークシートの撮影・選択")
+            st.info("📱 下の枠をタップして「撮影」を選ぶと、カメラが起動します。")
+            
+            uploaded_file = st.file_uploader("撮影するか、マークシート画像を選択してください", type=["jpg", "jpeg", "png"])
+            
+            if uploaded_file is not None:
+                st.image(uploaded_file, caption="選択した画像", width=450)
+                if st.button("この画像を解析して進む ▶", type="primary", use_container_width=True):
+                    with st.spinner("マークを自動読み取り中..."):
+                        test_id, exam_id, answers, debug_main, img_exam, img_q1, img_q2, logs = analyze_mark_sheet(uploaded_file, MAX_Q, NUM_OPTS)
+                        st.session_state.uploaded_image = uploaded_file
+                        st.session_state.recognized_test_id = test_id
+                        st.session_state.recognized_exam_id = exam_id
+                        st.session_state.recognized_answers = answers
+                        st.session_state.debug_main = debug_main
+                        st.session_state.img_exam = img_exam
+                        st.session_state.img_q1 = img_q1
+                        st.session_state.img_q2 = img_q2
+                        st.session_state.logs = logs
+                        st.session_state.step = 2
+                        st.rerun()
+
+        elif st.session_state.step == 2:
+            st.subheader("STEP 2: 読み取り結果の確認・修正")
+            
+            col_top_btn1, col_top_btn2 = st.columns([1, 2])
+            with col_top_btn1:
+                if st.button("🔄 再撮影（撮り直す）", type="secondary", use_container_width=True):
+                    st.session_state.step = 1
                     st.rerun()
 
-    elif st.session_state.step == 2:
-        st.subheader("STEP 2: 読み取り結果の確認・修正")
-        
-        col_top_btn1, col_top_btn2 = st.columns([1, 2])
-        with col_top_btn1:
-            if st.button("🔄 再撮影（撮り直す）", type="secondary", use_container_width=True):
-                st.session_state.step = 1
-                st.rerun()
+            with st.expander("🔍 デバッグ画像（検出範囲と読み取り位置）", expanded=True):
+                for l in st.session_state.get("logs", []): st.info(l)
+                c1, c2, c3 = st.columns([1, 1.5, 1.5])
+                with c1:
+                    st.caption("【TEST ID & STUDENT ID】")
+                    if st.session_state.img_exam is not None: st.image(st.session_state.img_exam, use_container_width=True)
+                with c2:
+                    st.caption("【問 1 〜 25】")
+                    if st.session_state.img_q1 is not None: st.image(st.session_state.img_q1, use_container_width=True)
+                with c3:
+                    st.caption("【問 26 〜 50】")
+                    if st.session_state.img_q2 is not None: st.image(st.session_state.img_q2, use_container_width=True)
 
-        with st.expander("🔍 デバッグ画像（検出範囲と読み取り位置）", expanded=True):
-            for l in st.session_state.get("logs", []): st.info(l)
-            c1, c2, c3 = st.columns([1, 1.5, 1.5])
-            with c1:
-                st.caption("【TEST ID & STUDENT ID】")
-                if st.session_state.img_exam is not None: st.image(st.session_state.img_exam, use_container_width=True)
-            with c2:
-                st.caption("【問 1 〜 25】")
-                if st.session_state.img_q1 is not None: st.image(st.session_state.img_q1, use_container_width=True)
-            with c3:
-                st.caption("【問 26 〜 50】")
-                if st.session_state.img_q2 is not None: st.image(st.session_state.img_q2, use_container_width=True)
+            raw_test_id = st.session_state.recognized_test_id.zfill(2)
+            raw_student_id = st.session_state.recognized_exam_id.zfill(4)
+            
+            c_id1, c_id2 = st.columns(2)
+            with c_id1:
+                test_id_val = st.text_input("TEST ID (2桁)", value=raw_test_id)
+            with c_id2:
+                student_id_val = st.text_input("STUDENT ID (年・組・番・号)", value=raw_student_id)
 
-        raw_test_id = st.session_state.recognized_test_id.zfill(2)
-        raw_student_id = st.session_state.recognized_exam_id.zfill(4)
-        
-        c_id1, c_id2 = st.columns(2)
-        with c_id1:
-            test_id_val = st.text_input("TEST ID (2桁)", value=raw_test_id)
-        with c_id2:
-            student_id_val = st.text_input("STUDENT ID (年・組・番・号)", value=raw_student_id)
+            t_cfg = load_test_config(test_id_val)
+            current_test_max_q = t_cfg.get("max_questions", MAX_Q)
 
-        t_cfg = load_test_config(test_id_val)
-        current_test_max_q = t_cfg.get("max_questions", MAX_Q)
+            st.markdown("---")
+            options = list(range(1, NUM_OPTS + 1)) + ["未マーク/無効"]
+            final_answers = {}
 
-        st.markdown("---")
-        options = list(range(1, NUM_OPTS + 1)) + ["未マーク/無効"]
-        final_answers = {}
-
-        col_left, col_right = st.columns(2)
-        with col_left:
-            st.markdown("##### ◀ 解答欄 (問1 〜 問25)")
-            for i in range(1, min(26, current_test_max_q + 1)):
-                q_key = f'Q{i}'
-                curr = st.session_state.recognized_answers.get(q_key, "未マーク/無効")
-                idx = options.index(curr) if curr in options else len(options) - 1
-                q_c1, q_c2 = st.columns([1, 2])
-                q_c1.write(f"**問 {i}**")
-                final_answers[q_key] = q_c2.selectbox(f"問{i}", options=options, index=idx, key=f"sel_{q_key}", label_visibility="collapsed")
-        with col_right:
-            if current_test_max_q >= 26:
-                st.markdown(f"##### ▶ 解答欄 (問26 〜 問{current_test_max_q})")
-                for i in range(26, current_test_max_q + 1):
+            col_left, col_right = st.columns(2)
+            with col_left:
+                st.markdown("##### ◀ 解答欄 (問1 〜 問25)")
+                for i in range(1, min(26, current_test_max_q + 1)):
                     q_key = f'Q{i}'
                     curr = st.session_state.recognized_answers.get(q_key, "未マーク/無効")
                     idx = options.index(curr) if curr in options else len(options) - 1
                     q_c1, q_c2 = st.columns([1, 2])
                     q_c1.write(f"**問 {i}**")
                     final_answers[q_key] = q_c2.selectbox(f"問{i}", options=options, index=idx, key=f"sel_{q_key}", label_visibility="collapsed")
+            with col_right:
+                if current_test_max_q >= 26:
+                    st.markdown(f"##### ▶ 解答欄 (問26 〜 問{current_test_max_q})")
+                    for i in range(26, current_test_max_q + 1):
+                        q_key = f'Q{i}'
+                        curr = st.session_state.recognized_answers.get(q_key, "未マーク/無効")
+                        idx = options.index(curr) if curr in options else len(options) - 1
+                        q_c1, q_c2 = st.columns([1, 2])
+                        q_c1.write(f"**問 {i}**")
+                        final_answers[q_key] = q_c2.selectbox(f"問{i}", options=options, index=idx, key=f"sel_{q_key}", label_visibility="collapsed")
 
-        st.markdown("---")
-        col_bot_btn1, col_bot_btn2 = st.columns([1, 2])
-        with col_bot_btn1:
-            if st.button("🔄 再撮影（撮り直す）", key="btn_re_take", use_container_width=True):
-                st.session_state.step = 1
-                st.rerun()
-        with col_bot_btn2:
-            if st.button("この内容で確定して採点する ▶", type="primary", use_container_width=True):
-                st.session_state.final_test_id = str(test_id_val).zfill(2)
-                st.session_state.final_student_id = str(student_id_val).zfill(4)
-                st.session_state.final_answers = final_answers
-
-                t_id = st.session_state.final_test_id
-                s_id = st.session_state.final_student_id
-                
-                t_cfg_calc = load_test_config(t_id)
-                t_max_q_calc = t_cfg_calc.get("max_questions", MAX_Q)
-
-                ans_key_calc = load_answer_key(t_id, t_max_q_calc)
-                pts_key_calc = load_points_key(t_id, t_max_q_calc)
-                spec_rules_calc = load_special_rules(t_id)
-
-                spec_q_map = {}
-                for r in spec_rules_calc:
-                    for q_num in range(r["start"], r["end"] + 1):
-                        spec_q_map[f'Q{q_num}'] = r
-
-                rule_res = []
-                for r in spec_rules_calc:
-                    all_c = True
-                    for q_num in range(r["start"], r["end"] + 1):
-                        q = f'Q{q_num}'
-                        if final_answers.get(q) != ans_key_calc.get(q):
-                            all_c = False
-                            break
-                    rule_res.append({"rule": r, "is_achieved": all_c})
-
-                t_score = 0
-                res_list = []
-                row_d = {
-                    '日時': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                    'TEST ID': t_id,
-                    'STUDENT ID': s_id
-                }
-
-                for i in range(1, t_max_q_calc + 1):
-                    q = f'Q{i}'
-                    u_a = final_answers.get(q)
-                    c_a = ans_key_calc.get(q)
-                    pts = pts_key_calc.get(q, 2)
-                    is_c = (u_a == c_a)
-                    
-                    sc = 0 if q in spec_q_map else (pts if is_c else 0)
-                    status = "〇" if is_c else "✕"
-
-                    t_score += sc
-                    res_list.append({'問題': q, 'あなたのマーク': u_a, '正解': c_a, '判定': status, '獲得点数': int(sc)})
-                    row_d[q] = u_a
-                    row_d[f'{q}_正誤'] = 1 if is_c else 0
-
-                for rr in rule_res:
-                    if rr["is_achieved"]:
-                        t_score += rr["rule"]["points"]
-
-                row_d['合計点'] = int(t_score)
-
-                save_test_result_to_csv(row_d)
-
-                st.session_state.result_total_score = int(t_score)
-                st.session_state.results_list = res_list
-                st.session_state.show_student_stats = False
-
-                st.session_state.step = 3
-                st.rerun()
-
-    elif st.session_state.step == 3:
-        st.subheader("STEP 3: 採点結果")
-        test_id = st.session_state.final_test_id
-        student_id = st.session_state.final_student_id
-        total_score = st.session_state.get("result_total_score", 0)
-        results_list = st.session_state.get("results_list", [])
-        user_ans = st.session_state.final_answers
-
-        st.balloons()
-        st.metric(label=f"【TEST ID: {test_id} / STUDENT ID: {student_id}】 さんの合計点", value=f"{total_score} 点")
-        st.dataframe(pd.DataFrame(results_list), height=350, use_container_width=True)
-
-        st.markdown("---")
-
-        col_btn1, col_btn2 = st.columns([1, 1])
-        with col_btn1:
-            if st.button("📊 平均点データを見る", use_container_width=True):
-                st.session_state.show_student_stats = not st.session_state.get("show_student_stats", False)
-        with col_btn2:
-            if st.button("次の解答を採点する ▶", type="primary", use_container_width=True):
-                st.session_state.show_student_stats = False
-                st.session_state.step = 1
-                st.rerun()
-
-        if st.session_state.get("show_student_stats", False):
             st.markdown("---")
-            st.subheader("📊 平均点・全体統計データ")
-            
-            df_all = safe_read_csv(DATA_FILE)
-            unique_test_ids = get_clean_unique_test_ids(df_all)
-            
-            if unique_test_ids:
-                df_all['TEST ID'] = df_all['TEST ID'].astype(str).str.strip().str.replace(r'\.0$', '', regex=True).str.zfill(2)
-                
-                default_idx = unique_test_ids.index(test_id) if test_id in unique_test_ids else 0
-                selected_stat_tid = st.selectbox("📌 表示する TEST ID を選択してください", unique_test_ids, index=default_idx)
-                
-                df_test = df_all[df_all['TEST ID'] == selected_stat_tid]
-                
-                if not df_test.empty:
-                    stat_t_cfg = load_test_config(selected_stat_tid)
-                    stat_max_q = stat_t_cfg.get("max_questions", MAX_Q)
-                    stat_answer_key = load_answer_key(selected_stat_tid, stat_max_q)
+            col_bot_btn1, col_bot_btn2 = st.columns([1, 2])
+            with col_bot_btn1:
+                if st.button("🔄 再撮影（撮り直す）", key="btn_re_take", use_container_width=True):
+                    st.session_state.step = 1
+                    st.rerun()
+            with col_bot_btn2:
+                if st.button("この内容で確定して採点する ▶", type="primary", use_container_width=True):
+                    st.session_state.final_test_id = str(test_id_val).zfill(2)
+                    st.session_state.final_student_id = str(student_id_val).zfill(4)
+                    st.session_state.final_answers = final_answers
 
-                    s1, s2, s3 = st.columns(3)
-                    s1.metric("解答提出者数", f"{len(df_test)} 人")
-                    s2.metric("合計の平均点", f"{round(df_test['合計点'].mean(), 1)} 点")
-                    s3.metric("最高点", f"{int(df_test['合計点'].max())} 点")
+                    t_id = st.session_state.final_test_id
+                    s_id = st.session_state.final_student_id
                     
-                    st.write("**【各問の正答率と個人の結果】**")
-                    
-                    stat_table = []
-                    warn_q_list = []
-                    
-                    for i in range(1, stat_max_q + 1):
+                    t_cfg_calc = load_test_config(t_id)
+                    t_max_q_calc = t_cfg_calc.get("max_questions", MAX_Q)
+
+                    ans_key_calc = load_answer_key(t_id, t_max_q_calc)
+                    pts_key_calc = load_points_key(t_id, t_max_q_calc)
+                    spec_rules_calc = load_special_rules(t_id)
+                    sections_config = load_sections_config(t_id)
+
+                    spec_q_map = {}
+                    for r in spec_rules_calc:
+                        for q_num in range(r["start"], r["end"] + 1):
+                            spec_q_map[f'Q{q_num}'] = r
+
+                    rule_res = []
+                    for r in spec_rules_calc:
+                        all_c = True
+                        for q_num in range(r["start"], r["end"] + 1):
+                            q = f'Q{q_num}'
+                            if final_answers.get(q) != ans_key_calc.get(q):
+                                all_c = False
+                                break
+                        rule_res.append({"rule": r, "is_achieved": all_c})
+
+                    t_score = 0
+                    res_list = []
+                    question_scores = {}
+                    row_d = {
+                        '日時': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                        'TEST ID': t_id,
+                        'STUDENT ID': s_id
+                    }
+
+                    for i in range(1, t_max_q_calc + 1):
                         q = f'Q{i}'
-                        correct_val = stat_answer_key.get(q, "-")
+                        u_a = final_answers.get(q)
+                        c_a = ans_key_calc.get(q)
+                        pts = pts_key_calc.get(q, 2)
+                        is_c = (u_a == c_a)
                         
-                        corr_col = f'{q}_正誤'
-                        if corr_col in df_test.columns:
-                            acc = pd.to_numeric(df_test[corr_col], errors='coerce').mean() * 100
-                        else:
-                            acc = 0.0
+                        sc = 0 if q in spec_q_map else (pts if is_c else 0)
+                        status = "〇" if is_c else "✕"
 
-                        if selected_stat_tid == test_id:
-                            my_mark = user_ans.get(q, "未解答")
-                            is_my_correct = (my_mark == correct_val)
-                            my_status = "〇" if is_my_correct else "✕"
-                        else:
-                            my_mark = "-"
-                            my_status = "-"
-                            is_my_correct = None
+                        t_score += sc
+                        question_scores[q] = sc
+                        res_list.append({'問題': q, 'あなたのマーク': u_a, '正解': c_a, '判定': status, '獲得点数': int(sc)})
+                        row_d[q] = u_a
+                        row_d[f'{q}_正誤'] = 1 if is_c else 0
 
-                        warn_mark = ""
-                        if selected_stat_tid == test_id and is_my_correct is False and acc >= 80.0:
-                            warn_mark = "⚠️ 要復習 (正答率80%以上)"
-                            warn_q_list.append(q)
+                    for rr in rule_res:
+                        if rr["is_achieved"]:
+                            t_score += rr["rule"]["points"]
 
-                        stat_table.append({
-                            '問題': q,
-                            '正解': correct_val,
-                            'あなたのマーク': my_mark,
-                            'あなたの判定': my_status,
-                            '正答率': f"{acc:.1f}%",
-                            '警告': warn_mark
-                        })
+                    row_d['合計点'] = int(t_score)
 
-                    if warn_q_list:
-                        st.warning(f"⚠️ **【注意問題】** 正答率が8割（80%）以上にもかかわらず誤答した問題があります: **{', '.join(warn_q_list)}**")
+                    # --- 大問ごとの小計と満点の計算 ---
+                    section_summary = []
+                    if sections_config:
+                        for sec in sections_config:
+                            s_name = sec.get("name", "大問")
+                            s_start = sec.get("start", 1)
+                            s_end = sec.get("end", 1)
+                            
+                            sec_score = 0
+                            sec_max_pts = 0
+                            
+                            for q_num in range(s_start, s_end + 1):
+                                q_k = f'Q{q_num}'
+                                sec_score += question_scores.get(q_k, 0)
+                                if q_k not in spec_q_map:
+                                    sec_max_pts += pts_key_calc.get(q_k, 2)
+                            
+                            # 特殊ルールが大問内に入っている場合
+                            for rr in rule_res:
+                                r = rr["rule"]
+                                if r["start"] >= s_start and r["end"] <= s_end:
+                                    sec_max_pts += r["points"]
+                                    if rr["is_achieved"]:
+                                        sec_score += r["points"]
 
-                    st.dataframe(pd.DataFrame(stat_table), height=350, use_container_width=True)
-                else:
-                    st.info("選択された TEST ID の提出データはまだありません。")
+                            section_summary.append({
+                                "name": s_name,
+                                "range": f"問{s_start}〜問{s_end}",
+                                "score": sec_score,
+                                "max_score": sec_max_pts
+                            })
+
+                    save_test_result_to_csv(row_d)
+
+                    st.session_state.result_total_score = int(t_score)
+                    st.session_state.results_list = res_list
+                    st.session_state.section_summary = section_summary
+                    st.session_state.step = 3
+                    st.rerun()
+
+        elif st.session_state.step == 3:
+            st.subheader("STEP 3: 採点結果")
+            test_id = st.session_state.final_test_id
+            student_id = st.session_state.final_student_id
+            total_score = st.session_state.get("result_total_score", 0)
+            results_list = st.session_state.get("results_list", [])
+            section_summary = st.session_state.get("section_summary", [])
+            
+            t_cfg = load_test_config(test_id)
+            target_total = t_cfg.get("total_score", 100)
+
+            st.balloons()
+            
+            # --- 総合得点表示 ---
+            st.metric(label=f"【TEST ID: {test_id} / STUDENT ID: {student_id}】 さんの総合点", value=f"{total_score} 点 / {target_total} 点")
+
+            # --- 大問別の小計表示 ---
+            if section_summary:
+                st.markdown("##### 📚 大問別 得点内訳（小計）")
+                cols = st.columns(min(len(section_summary), 4))
+                for idx, sec in enumerate(section_summary):
+                    col_idx = idx % min(len(section_summary), 4)
+                    with cols[col_idx]:
+                        st.markdown(f"""
+                        <div class="section-score-card">
+                            <div class="section-score-title">{sec['name']} ({sec['range']})</div>
+                            <div class="section-score-val">{sec['score']} / {sec['max_score']} 点</div>
+                        </div>
+                        """, unsafe_allow_html=True)
+            
+            st.markdown("---")
+            st.write("**【設問別 正誤一覧】**")
+            st.dataframe(pd.DataFrame(results_list), height=350, use_container_width=True)
+
+            st.markdown("---")
+            if st.button("次の解答を採点する ▶", type="primary", use_container_width=True):
+                st.session_state.step = 1
+                st.rerun()
+
+    # --- タブ2: マークシート不要で統計が見られる生徒用統計画面 ---
+    with tab_student_2:
+        st.subheader("📊 テスト別 統計・正答率の確認")
+        st.caption("※ マークシートを撮影しなくても、TEST IDを選ぶだけで全体の平均点や問題ごとの正答率を確認できます。")
+        
+        df_all = safe_read_csv(DATA_FILE)
+        unique_test_ids = get_clean_unique_test_ids(df_all)
+        
+        if unique_test_ids:
+            df_all['TEST ID'] = df_all['TEST ID'].astype(str).str.strip().str.replace(r'\.0$', '', regex=True).str.zfill(2)
+            selected_stat_tid = st.selectbox("📌 確認したい TEST ID を選択してください", unique_test_ids, key="student_stat_tid")
+            
+            df_test = df_all[df_all['TEST ID'] == selected_stat_tid]
+            
+            if not df_test.empty:
+                stat_t_cfg = load_test_config(selected_stat_tid)
+                stat_max_q = stat_t_cfg.get("max_questions", MAX_Q)
+                stat_answer_key = load_answer_key(selected_stat_tid, stat_max_q)
+                stat_total_score = stat_t_cfg.get("total_score", 100)
+
+                df_test['合計点'] = pd.to_numeric(df_test['合計点'], errors='coerce')
+
+                s1, s2, s3 = st.columns(3)
+                s1.metric("解答提出者数", f"{len(df_test)} 人")
+                s2.metric("全体平均点", f"{round(df_test['合計点'].mean(), 1)} 点 / {stat_total_score}点")
+                s3.metric("最高点", f"{int(df_test['合計点'].max())} 点")
+                
+                st.markdown("---")
+                st.write("**【各問の正答率一覧】**")
+                
+                stat_table = []
+                for i in range(1, stat_max_q + 1):
+                    q = f'Q{i}'
+                    correct_val = stat_answer_key.get(q, "-")
+                    
+                    corr_col = f'{q}_正誤'
+                    if corr_col in df_test.columns:
+                        acc = pd.to_numeric(df_test[corr_col], errors='coerce').mean() * 100
+                    else:
+                        acc = 0.0
+
+                    stat_table.append({
+                        '問題': q,
+                        '正解': correct_val,
+                        '全体正答率': f"{acc:.1f}%"
+                    })
+
+                st.dataframe(pd.DataFrame(stat_table), height=400, use_container_width=True)
             else:
-                st.warning("まだ採点データが保存されていません。")
+                st.info("選択された TEST ID のデータはまだありません。")
+        else:
+            st.warning("まだ採点データが登録されていません。")
 
-elif mode == "教員用（正解・配点・特殊ルール設定）":
+elif mode == "教員用（正解・配点・大問・特殊ルール設定）":
     st.header("■ 教員用 各種設定ダッシュボード")
-    tab0, tab1 = st.tabs(["⚙️ システム・パスワード設定", "📝 TEST ID別 正答・配点管理"])
+    tab0, tab1 = st.tabs(["⚙️ システム・パスワード設定", "📝 TEST ID別 正答・配点・大問管理"])
     
     with tab0:
         st.subheader("⚙️ グローバル上限設定")
@@ -640,7 +750,7 @@ elif mode == "教員用（正解・配点・特殊ルール設定）":
                 st.rerun()
 
     with tab1:
-        st.subheader("📝 TEST ID 別 正答・配点管理")
+        st.subheader("📝 TEST ID 別 正答・配点・大問管理")
         
         all_ans_data = load_json_file(ANSWER_KEY_FILE, {})
         existing_test_ids = sorted(list(all_ans_data.keys()))
@@ -682,8 +792,34 @@ elif mode == "教員用（正解・配点・特殊ルール設定）":
             st.success(f"TEST ID [{target_test_id}] の基本設定を保存しました！（全 {new_max_q_val} 問 / {new_total_score_val} 点満点）")
             st.rerun()
 
+        # --- 新機能: 大問の区切り（セクション）設定 ---
         st.markdown("---")
-        st.markdown("##### 📝 2. 正答・配点の設定")
+        st.markdown("##### 📚 2. 大問の区切り（セクション）設定")
+        st.caption("※「第1問: 問1〜6」「第2問: 問7〜14」のように区切ると、生徒の採点結果画面に大問別の小計が表示されます。")
+        
+        existing_sections = load_sections_config(target_test_id)
+        
+        col_sec_num, col_sec_btn = st.columns([2, 1])
+        num_sections = col_sec_num.number_input("大問の数", min_value=1, max_value=10, value=max(len(existing_sections), 1), step=1, key="num_sec_input")
+        
+        new_sections_list = []
+        for sec_idx in range(int(num_sections)):
+            default_sec = existing_sections[sec_idx] if sec_idx < len(existing_sections) else {}
+            
+            c_name, c_s, c_e = st.columns([2, 1.5, 1.5])
+            s_name = c_name.text_input(f"大問{sec_idx+1} 名称", value=default_sec.get("name", f"第{sec_idx+1}問"), key=f"sec_name_{target_test_id}_{sec_idx}")
+            s_start = c_s.number_input(f"開始問", min_value=1, max_value=t_max_q, value=int(default_sec.get("start", 1)), step=1, key=f"sec_start_{target_test_id}_{sec_idx}")
+            s_end = c_e.number_input(f"終了問", min_value=1, max_value=t_max_q, value=int(default_sec.get("end", min(5, t_max_q))), step=1, key=f"sec_end_{target_test_id}_{sec_idx}")
+            
+            new_sections_list.append({"name": s_name, "start": int(s_start), "end": int(s_end)})
+
+        if st.button("大問区切り設定を保存", type="secondary"):
+            save_sections_config(target_test_id, new_sections_list)
+            st.success(f"TEST ID [{target_test_id}] の大問設定を保存しました！")
+            st.rerun()
+
+        st.markdown("---")
+        st.markdown("##### 📝 3. 正答・配点の設定")
 
         current_answers = load_answer_key(target_test_id, t_max_q)
         current_points = load_points_key(target_test_id, t_max_q)
@@ -733,7 +869,7 @@ elif mode == "教員用（正解・配点・特殊ルール設定）":
                 st.rerun()
 
         st.markdown("---")
-        st.markdown("##### 🎯 3. 特殊配点（完答ルール）の設定")
+        st.markdown("##### 🎯 4. 特殊配点（完答ルール）の設定")
         st.caption("※「問18〜問21まですべて正解で4点」などの完答ルールを設定できます。対象となった設問の個別配点欄は自動的に非表示（🔒 完答ルール対象）となります。")
 
         col_sr1, col_sr2, col_sr3, col_sr4 = st.columns([1.5, 1.5, 1.5, 1.5])
@@ -817,14 +953,15 @@ elif mode == "教員用（正解・配点・特殊ルール設定）":
         else:
             st.success(f"✅ **配点合計チェックOK**: 設定されている配点合計は **{calculated_total} 点**（目標満点: **{t_total_score} 点**）です。")
 
-        if st.button(f"TEST ID [{target_test_id}] の正答・配点を一括保存する", type="primary", use_container_width=True):
+        if st.button(f"TEST ID [{target_test_id}] の設定（正答・配点・大問）を一括保存する", type="primary", use_container_width=True):
             if calculated_total != t_total_score:
                 st.error(f"❌ 配点の合計（{calculated_total} 点）が基本設定の目標満点（{t_total_score} 点）と一致していません。配点を修正してから保存してください。")
             else:
                 save_answer_key(target_test_id, new_answers)
                 save_points_key(target_test_id, new_points)
                 save_test_config(target_test_id, t_max_q, t_total_score)
-                st.success(f"TEST ID [{target_test_id}] の設定（正答・配点・問題数）を保存しました！")
+                save_sections_config(target_test_id, new_sections_list)
+                st.success(f"TEST ID [{target_test_id}] の設定（正答・配点・問題数・大問）を保存しました！")
                 st.rerun()
 
 elif mode == "教員用（集計・Excel出力）":
@@ -949,7 +1086,6 @@ elif mode == "教員用（集計・Excel出力）":
             if correct_cols:
                 q_acc = df_display[correct_cols].apply(pd.to_numeric, errors='coerce').mean() * 100
                 
-                # --- 正答率7割（70%）未満の問題の抽出と警告表示 ---
                 low_acc_questions = [f"{col.replace('_正誤', '')} ({acc:.1f}%)" for col, acc in q_acc.items() if acc < 70.0]
                 if low_acc_questions:
                     st.error(f"⚠️ **正答率が7割（70%）を切っている注意問題 ({len(low_acc_questions)}問)**: {', '.join(low_acc_questions)}")
@@ -959,7 +1095,6 @@ elif mode == "教員用（集計・Excel出力）":
                 q_acc_df = q_acc.to_frame(name="正答率(%)").T
                 q_acc_df.columns = [col.replace('_正誤', '') for col in correct_cols]
                 
-                # --- セルのスタイリング関数 (70%未満を赤色＋太字に強調) ---
                 def style_low_acc(val):
                     try:
                         v = float(val)
