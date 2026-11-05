@@ -7,6 +7,11 @@ import numpy as np
 from PIL import Image, ImageOps
 from datetime import datetime
 
+# =========================================================
+# セキュリティ設定
+# =========================================================
+TEACHER_PASSWORD = "admin123"  # 👈 教員用パスワード（必要に応じて変更してください）
+
 # --- データ保存用ファイルパス ---
 DATA_FILE = "test_results.csv"
 ANSWER_KEY_FILE = "answer_key.json"
@@ -263,6 +268,21 @@ NUM_OPTS = config.get("num_options", 9)
 if "step" not in st.session_state: st.session_state.step = 1
 
 mode = st.sidebar.radio("モード選択", ["生徒用（マーク撮影・採点）", "教員用（正解・配点・特殊ルール設定）", "教員用（集計・Excel出力）"])
+
+# ---------------------------------------------------------
+# 教員用モード パスワード認証認証処理
+# ---------------------------------------------------------
+if mode in ["教員用（正解・配点・特殊ルール設定）", "教員用（集計・Excel出力）"]:
+    st.subheader("🔒 教員用認証")
+    input_pass = st.text_input("教員用パスワードを入力してください", type="password")
+    if input_pass != TEACHER_PASSWORD:
+        if input_pass:
+            st.error("パスワードが正しくありません。")
+        else:
+            st.info("この機能を利用するには教員用パスワードの入力が必要です。")
+        st.stop()
+    st.success("認証に成功しました。")
+    st.markdown("---")
 
 if mode == "生徒用（マーク撮影・採点）":
     st.header(f"■ 生徒用 マークシート送信・採点 (全{MAX_Q}問 / 選択肢1〜{NUM_OPTS})")
