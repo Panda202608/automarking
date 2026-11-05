@@ -433,13 +433,11 @@ if mode == "生徒用（マーク撮影・採点）":
         points_key = load_points_key(test_id, current_test_max_q)
         special_rules = load_special_rules(test_id)
 
-        # 完答ルールの対象問題マップの作成
         special_q_map = {}
         for r in special_rules:
             for q_num in range(r["start"], r["end"] + 1):
                 special_q_map[f'Q{q_num}'] = r
 
-        # 各完答ルールの達成判定
         rule_results = []
         for r in special_rules:
             all_correct = True
@@ -469,7 +467,7 @@ if mode == "生徒用（マーク撮影・採点）":
             is_c = (u_a == c_a)
             
             if q in special_q_map:
-                sc = 0 # 完答対象は個別点数を0点（グループ加算で一括計算）
+                sc = 0 
             else:
                 sc = pts if is_c else 0
 
@@ -480,7 +478,6 @@ if mode == "生徒用（マーク撮影・採点）":
             row_data[q] = u_a
             row_data[f'{q}_正誤'] = 1 if is_c else 0
 
-        # 完答達成ボーナスを点数に加算
         for rr in rule_results:
             r = rr["rule"]
             if rr["is_achieved"]:
@@ -577,7 +574,6 @@ elif mode == "教員用（正解・配点・特殊ルール設定）":
         t_max_q = int(t_config.get("max_questions", 50))
         t_total_score = int(t_config.get("total_score", 100))
 
-        # --- TEST ID が変更・選択された瞬間に保存データを画面入力欄に同期反映 ---
         if "prev_target_test_id" not in st.session_state or st.session_state.prev_target_test_id != target_test_id:
             st.session_state.prev_target_test_id = target_test_id
             loaded_ans = load_answer_key(target_test_id, t_max_q)
@@ -605,6 +601,13 @@ elif mode == "教員用（正解・配点・特殊ルール設定）":
 
         current_answers = load_answer_key(target_test_id, t_max_q)
         current_points = load_points_key(target_test_id, t_max_q)
+        
+        # 特殊配点（完答ルール）対象の問番号集合を取得
+        current_rules = load_special_rules(target_test_id)
+        special_q_set = set()
+        for r in current_rules:
+            for q_num in range(r["start"], r["end"] + 1):
+                special_q_set.add(q_num)
 
         input_method = st.radio("入力方法を選択", ["✍️ 正答・配点の手入力", "📷 正解マークシート画像から正答を自動読み取り"], horizontal=True)
 
@@ -623,12 +626,12 @@ elif mode == "教員用（正解・配点・特殊ルール設定）":
             col_bp1, col_bp2 = st.columns([2, 1])
             bulk_val = col_bp1.number_input("全問の配点を一括変更（点）", min_value=0, max_value=50, value=2, step=1, key="bulk_all_pts")
             if col_bp2.button("全問一括適用", type="secondary"):
-                new_bulk_pts = {f'Q{i}': int(bulk_val) for i in range(1, t_max_q + 1)}
+                new_bulk_pts = {f'Q{i}': (0 if i in special_q_set else int(bulk_val)) for i in range(1, t_max_q + 1)}
                 save_points_key(target_test_id, new_bulk_pts)
                 
                 for i in range(1, t_max_q + 1):
                     k = f"pts_{target_test_id}_Q{i}"
-                    st.session_state[k] = int(bulk_val)
+                    st.session_state[k] = 0 if i in special_q_set else int(bulk_val)
                 
                 st.success(f"TEST ID [{target_test_id}] の全問配点を {int(bulk_val)} 点に変更しました！")
                 st.rerun()
@@ -646,17 +649,19 @@ elif mode == "教員用（正解・配点・特殊ルール設定）":
                     curr_pts = load_points_key(target_test_id, t_max_q)
                     for i in range(int(start_q), int(end_q) + 1):
                         q_k = f'Q{i}'
-                        curr_pts[q_k] = int(range_val)
-                        st.session_state[f"pts_{target_test_id}_{q_k}"] = int(range_val)
+                        if i in special_q_set:
+                            curr_pts[q_k] = 0
+                            st.session_state[f"pts_{target_test_id}_{q_k}"] = 0
+                        else:
+                            curr_pts[q_k] = int(range_val)
+                            st.session_state[f"pts_{target_test_id}_{q_k}"] = int(range_val)
                     save_points_key(target_test_id, curr_pts)
                     st.success(f"問{int(start_q)} 〜 問{int(end_q)} の配点を {int(range_val)} 点に変更しました！")
                     st.rerun()
 
             st.markdown("---")
             st.markdown("##### 🎯 3. 特殊配点（完答ルール）の設定")
-            st.caption("※「問18〜問21まですべて正解で4点」などの完答ルールを設定できます。")
-
-            current_rules = load_special_rules(target_test_id)
+            st.caption("※「問18〜問21まですべて正解で4点」などの完答ルールを設定できます。対象となった設問の個別配点欄は自動的に非表示（🔒 完答ルール対象）となります。")
 
             col_sr1, col_sr2, col_sr3, col_sr4 = st.columns([1.5, 1.5, 1.5, 1.5])
             s_q = col_sr1.number_input("完答 開始問", min_value=1, max_value=t_max_q, value=18, step=1, key="sr_start_q")
@@ -705,8 +710,13 @@ elif mode == "教員用（正解・配点・特殊ルール設定）":
                     q_c1.write(f"**問 {i}**")
                     new_answers[q_k] = q_c2.selectbox(f"正答_問{i}", options=options, index=idx, key=f"ans_{target_test_id}_{q_k}", label_visibility="collapsed")
                     
-                    init_pt = int(current_points.get(q_k, 2))
-                    new_points[q_k] = q_c3.number_input(f"配点_問{i}", min_value=0, max_value=50, value=init_pt, step=1, key=f"pts_{target_test_id}_{q_k}", label_visibility="collapsed")
+                    # 特殊ルール対象の問は配点入力欄を出さずメッセージを表示
+                    if i in special_q_set:
+                        q_c3.caption("🔒 完答ルール対象")
+                        new_points[q_k] = 0
+                    else:
+                        init_pt = int(current_points.get(q_k, 2))
+                        new_points[q_k] = q_c3.number_input(f"配点_問{i}", min_value=0, max_value=50, value=init_pt, step=1, key=f"pts_{target_test_id}_{q_k}", label_visibility="collapsed")
 
             with col_a_r:
                 if t_max_q >= 26:
@@ -719,8 +729,13 @@ elif mode == "教員用（正解・配点・特殊ルール設定）":
                         q_c1.write(f"**問 {i}**")
                         new_answers[q_k] = q_c2.selectbox(f"正答_問{i}", options=options, index=idx, key=f"ans_{target_test_id}_{q_k}", label_visibility="collapsed")
                         
-                        init_pt = int(current_points.get(q_k, 2))
-                        new_points[q_k] = q_c3.number_input(f"配点_問{i}", min_value=0, max_value=50, value=init_pt, step=1, key=f"pts_{target_test_id}_{q_k}", label_visibility="collapsed")
+                        # 特殊ルール対象の問は配点入力欄を出さずメッセージを表示
+                        if i in special_q_set:
+                            q_c3.caption("🔒 完答ルール対象")
+                            new_points[q_k] = 0
+                        else:
+                            init_pt = int(current_points.get(q_k, 2))
+                            new_points[q_k] = q_c3.number_input(f"配点_問{i}", min_value=0, max_value=50, value=init_pt, step=1, key=f"pts_{target_test_id}_{q_k}", label_visibility="collapsed")
 
             st.markdown("---")
             if st.button(f"TEST ID [{target_test_id}] の正答・配点を一括保存する", type="primary", use_container_width=True):
