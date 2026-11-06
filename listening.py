@@ -817,7 +817,6 @@ if mode == "📱 生徒用（解答・採点・統計）":
             st.markdown("---")
             st.write("**【設問別 正誤一覧】**")
             
-            # --- ここからスタイリング・正答率計算の追加処理 ---
             df_all = safe_read_csv(DATA_FILE)
             question_acc = {}
             if not df_all.empty and 'TEST ID' in df_all.columns:
@@ -838,17 +837,14 @@ if mode == "📱 生徒用（解答・採点・統計）":
                 
                 if status == '✕' or status == '×':
                     if acc > 80.0:
-                        # 全体の正答率が80%超えなのに間違えた場合（赤系）
                         return ['background-color: #ffebee; color: #b71c1c'] * len(row)
                     else:
-                        # 通常の不正解（黄色）
                         return ['background-color: #fff9c4; color: #f57f17'] * len(row)
                 return [''] * len(row)
 
             res_df = pd.DataFrame(results_list)
-            # hide_index=True を使用して一番左のインデックス(0,1,2...)を非表示にする
-            st.dataframe(res_df.style.apply(highlight_rows, axis=1), height=350, use_container_width=True, hide_index=True)
-            # --- 追加処理ここまで ---
+            # height を指定せず、st.dataframe で全体を表示させるよう設定
+            st.dataframe(res_df.style.apply(highlight_rows, axis=1), use_container_width=True, hide_index=True)
 
             st.markdown("---")
             if st.button("次の解答を採点する ▶", type="primary", use_container_width=True):
