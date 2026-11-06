@@ -9,6 +9,13 @@ from datetime import datetime
 import plotly.graph_objects as go
 from filelock import FileLock
 
+# Gemini API ライブラリのインポート（未インストールの場合は案内）
+try:
+    import google.generativeai as genai
+    HAS_GENAI = True
+except ImportError:
+    HAS_GENAI = False
+
 # --- データ保存用ファイルパス ---
 DATA_FILE = "test_results.csv"
 LOCK_FILE = "test_results.csv.lock"   # 排他ロック用ファイル
@@ -19,6 +26,7 @@ RULES_KEY_FILE = "special_rules.json"  # テストIDごとの特殊配点ルー�
 SECTIONS_KEY_FILE = "sections_keys.json" # テストIDごとの大問設定
 CONFIG_FILE = "config.json"
 PASSWORD_FILE = "password.json"
+GEMINI_KEY_FILE = "gemini_key.json"    # APIキー保存用
 
 st.set_page_config(page_title="共通テスト採点・集計システム", layout="wide")
 
@@ -98,13 +106,20 @@ def load_password():
 def save_password(new_pass):
     save_json_file(PASSWORD_FILE, {"password": new_pass})
 
+def load_gemini_key():
+    data = load_json_file(GEMINI_KEY_FILE, {"api_key": ""})
+    return data.get("api_key", "")
+
+def save_gemini_key(api_key):
+    save_json_file(GEMINI_KEY_FILE, {"api_key": api_key})
+
 def load_global_config():
     return load_json_file(CONFIG_FILE, {"max_questions": 50, "num_options": 9})
 
 def load_test_config(test_id):
     data = load_json_file(TEST_CONFIG_FILE, {})
     t_key = str(test_id).zfill(2)
-    default_cfg = {"max_questions": 50, "total_score": 100}
+    default_cfg = {"max_questions": 37, "total_score": 100}
     return data.get(t_key, default_cfg)
 
 def save_test_config(test_id, max_q, total_score):
@@ -194,7 +209,7 @@ def save_test_result_to_csv(row_data):
         df_all.to_csv(DATA_FILE, index=False, encoding='utf-8-sig')
 
 # ---------------------------------------------------------
-# 12個マーカー分離アルゴリズム
+# 生徒マークシート採点処理（OpenCV方式：従来のまま変更なし）
 # ---------------------------------------------------------
 def group_12_markers_robust(markers):
     markers_by_y = sorted(markers, key=lambda m: m[1])
@@ -207,9 +222,6 @@ def group_12_markers_robust(markers):
     
     return group_exam, group_q1, group_q2
 
-# ---------------------------------------------------------
-# マーカー自動検出
-# ---------------------------------------------------------
 def detect_square_markers(gray_img):
     norm_h, norm_w = gray_img.shape
     blurred = cv2.GaussianBlur(gray_img, (5, 5), 0)
@@ -264,9 +276,6 @@ def auto_orient_and_get_markers(image):
                 pass
     return image, markers, f"向き補正不可: {msg}"
 
-# ---------------------------------------------------------
-# メイン解析処理（生徒マークシート用）
-# ---------------------------------------------------------
 def analyze_mark_sheet(image_file, max_q=50, num_opts=9):
     logs = []
     pil_img = Image.open(image_file)
@@ -409,57 +418,87 @@ def analyze_mark_sheet(image_file, max_q=50, num_opts=9):
            logs
 
 # ---------------------------------------------------------
-# 模範解答画像の解析関数（自動解析＋手動補正用）
+# 【教員用】模範解答画像 AI自動読み取り関数 (Gemini Vision API)
 # ---------------------------------------------------------
-def analyze_master_answer_sheet(image_file):
+def analyze_master_answer_sheet_ai(image_file, api_key):
     """
-    模範解答画像を読み取り、正答・配点・完答ルール・大問構成を判定して返す関数。
-    API未設定時や解析補助用の基本構造を含みます。
+    黒塗り文字（黒地に白抜き数字）を明示指定したプロンプトでGemini Vision APIを呼び出し、
+    正答・配点・大問構成・完答ルールをJSONで全自動抽出する関数。
     """
+    if not HAS_GENAI:
+        return None, "google-generativeai ライブラリがインストールされていません。`pip install google-generativeai` を実行してください。"
+    
+    if not api_key:
+        return None, "Gemini APIキーが設定されていません。上の入力欄にAPIキーを入力してください。"
+
     try:
-        # 例: REACH 30 第1回 模範解答（画像解析の初期値・仮データ）
-        # ※実際にはここで画像OCR / Vision API等で自動抽出し、誤りがあれば下のフォームで人間が直す仕組み
-        extracted_data = {
-            "max_questions": 37,
-            "total_score": 100,
-            "answers": {
-                "Q1": 1, "Q2": 4, "Q3": 3, "Q4": 4, "Q5": 1, "Q6": 2, "Q7": 1,
-                "Q8": 0, "Q9": 2, "Q10": 4, "Q11": 5, "Q12": 3, "Q13": 2, "Q14": 1,
-                "Q15": 1, "Q16": 2, "Q17": 2, "Q18": 4, "Q19": 5, "Q20": 6, "Q21": 1,
-                "Q22": 1, "Q23": 2, "Q24": 3, "Q25": 4, "Q26": 5, "Q27": 1, "Q28": 3,
-                "Q29": 6, "Q30": 2, "Q31": 4, "Q32": 5, "Q33": 3, "Q34": 2, "Q35": 1,
-                "Q36": 2, "Q37": 4
-            },
-            "points": {
-                "Q1": 4, "Q2": 4, "Q3": 4, "Q4": 4, "Q5": 3, "Q6": 3, "Q7": 3,
-                "Q8": 3, "Q9": 4, "Q10": 4, "Q11": 4, "Q12": 3, "Q13": 3, "Q14": 3,
-                "Q15": 3, "Q16": 3, "Q17": 3, "Q18": 0, "Q19": 0, "Q20": 0, "Q21": 0,
-                "Q22": 1, "Q23": 1, "Q24": 1, "Q25": 1, "Q26": 4, "Q27": 3, "Q28": 0,
-                "Q29": 0, "Q30": 2, "Q31": 2, "Q32": 4, "Q33": 5, "Q34": 3, "Q35": 3,
-                "Q36": 4, "Q37": 4
-            },
-            "special_rules": [
-                {"type": "range", "start": 18, "end": 21, "points": 4},
-                {"type": "range", "start": 28, "end": 29, "points": 2}
-            ],
-            "sections": [
-                {"name": "第1問", "start": 1, "end": 7},
-                {"name": "第2問", "start": 8, "end": 11},
-                {"name": "第3問", "start": 12, "end": 17},
-                {"name": "第4問", "start": 18, "end": 26},
-                {"name": "第5問", "start": 27, "end": 33},
-                {"name": "第6問", "start": 34, "end": 37}
-            ]
+        genai.configure(api_key=api_key)
+        
+        pil_img = Image.open(image_file)
+        pil_img = ImageOps.exif_transpose(pil_img)
+        
+        # API呼び出し用のモデル設定
+        model = genai.GenerativeModel('gemini-1.5-flash')
+        
+        # 黒塗り（黒地に白抜き数字）を判別させる厳密なプロンプト
+        prompt = """
+        添付されたテストの模範解答・正答一覧表の画像を精密に解析し、結果をJSON形式のみで出力してください。
+
+        【重要：正答マークの判別ルール】
+        1. 各解答番号の「解答欄（1 2 3 4 5 6 0 等）」の中で、**「黒く塗りつぶされて数字が白抜きになっている（黒地の）マス」が正解（正答）**です。
+        2. 「白地に黒文字」になっているマスは非選択（不正解選択肢）ですので無視してください。
+        3. 選択肢が「0」から始まる場合（⓪など）は正答数字「0」として認識してください。
+
+        【配点と特殊ルールの判別ルール】
+        1. 「配点」列に書かれている数字（例: 4, 3, 1など）を取得してください。
+        2. 「*4」や「*2」のようにアスタリスクが付いている配点は注釈の「完答配点（全部正解で点数）」です。
+           - この完答範囲の問題群を special_rules に抽出してください。
+           - 完答対象となった個別の問題配点は 0 にしてください。
+        3. 大問の見出し（「第1問」「第2問」等）から、各セクションの開始問と終了問を sections として抽出してください。
+
+        【出力JSONフォーマット】
+        必ず以下のキー構造を持つ純粋なJSON文字列のみを出力してください（説明文は一切含めないでください）。
+        {
+          "max_questions": 全問題数(整数),
+          "total_score": 目標満点(整数),
+          "answers": {
+            "Q1": 正答番号(整数),
+            "Q2": 正答番号(整数)
+          },
+          "points": {
+            "Q1": 個別配点(整数),
+            "Q2": 個別配点(整数)
+          },
+          "special_rules": [
+            {"type": "range", "start": 18, "end": 21, "points": 4}
+          ],
+          "sections": [
+            {"name": "第1問", "start": 1, "end": 7}
+          ]
         }
-        return extracted_data, "模範解答の自動読み取りに成功しました。以下のフォームで内容を確認し、誤りがあれば手動で修正してください。"
+        """
+
+        response = model.generate_content([prompt, pil_img])
+        text_resp = response.text.strip()
+        
+        # JSONブロックの抽出処理
+        if "```json" in text_resp:
+            text_resp = text_resp.split("```json")[1].split("```")[0].strip()
+        elif "```" in text_resp:
+            text_resp = text_resp.split("```")[1].split("```")[0].strip()
+
+        extracted_data = json.loads(text_resp)
+        return extracted_data, "✨ AIによる模範解答（黒塗り正答）の自動読み取りが完了しました！下のフォームで確認・手動補正してください。"
+
     except Exception as e:
-        return None, f"解析エラーが発生しました: {e}"
+        return None, f"Gemini APIによる解析中にエラーが発生しました: {e}"
 
 # --- 設定・パスワードロード ---
 global_config = load_global_config()
 MAX_Q = global_config.get("max_questions", 50)
 NUM_OPTS = global_config.get("num_options", 9)
 teacher_password = load_password()
+saved_gemini_key = load_gemini_key()
 
 if "step" not in st.session_state: st.session_state.step = 1
 
@@ -549,7 +588,7 @@ if mode == "📱 生徒用（解答・採点・統計）":
             current_test_max_q = t_cfg.get("max_questions", MAX_Q)
 
             st.markdown("---")
-            options = list(range(1, NUM_OPTS + 1)) + ["未マーク/無効", "重複マーク"]
+            options = list(range(0, NUM_OPTS + 1)) + ["未マーク/無効", "重複マーク"]
             final_answers = {}
 
             col_left, col_right = st.columns(2)
@@ -872,6 +911,15 @@ elif mode == "教員用（正解・配点・大問・特殊ルール設定）":
             st.rerun()
             
         st.markdown("---")
+        st.subheader("🤖 Gemini API キーの設定（模範解答AI読み取り用）")
+        st.caption("※ Google AI Studio で取得したAPIキーを入力してください。一度保存すると次回から自動で使用されます。")
+        input_gemini_key = st.text_input("Gemini API Key", value=saved_gemini_key, type="password")
+        if st.button("APIキーを保存"):
+            save_gemini_key(input_gemini_key)
+            st.success("Gemini APIキーを正常に保存しました！")
+            st.rerun()
+
+        st.markdown("---")
         st.subheader("🔑 教員用パスワードの変更")
         curr_pass_check = st.text_input("現在のパスワードを入力してください", type="password", key="pass_curr")
         new_pass1 = st.text_input("新しいパスワード", type="password", key="pass_new1")
@@ -907,7 +955,7 @@ elif mode == "教員用（正解・配点・大問・特殊ルール設定）":
 
         target_test_id = str(selected_t_id).zfill(2)
         t_config = load_test_config(target_test_id)
-        t_max_q = int(t_config.get("max_questions", 50))
+        t_max_q = int(t_config.get("max_questions", 37))
         t_total_score = int(t_config.get("total_score", 100))
 
         if "prev_target_test_id" not in st.session_state or st.session_state.prev_target_test_id != target_test_id:
@@ -922,37 +970,47 @@ elif mode == "教員用（正解・配点・大問・特殊ルール設定）":
         st.info(f"現在 **TEST ID: {target_test_id}** の正答・配点を設定・編集しています。")
         
         # ---------------------------------------------------------
-        # 機能追加: 模範解答画像からの自動入力＆手動補正プレビュー
+        # 🤖 模範解答画像 AI自動読み込み（黒塗り指示プロンプト）
         # ---------------------------------------------------------
-        with st.expander("📷 【新機能】模範解答画像から自動で読み込んで入力（手動修正可）", expanded=False):
-            st.caption("※ 模範解答の画像（写真・スキャン画像）をアップロードすると、正答・配点・完答ルール・大問構成を読み込んで下の入力欄に一括適用します。読み取り後に手動で修正できます。")
+        with st.expander("📷 【AI機能】模範解答画像から黒塗り正答を自動解析（手動修正可）", expanded=True):
+            st.caption("※ 模範解答画像をアップロードすると、AIが「黒地に白抜き文字」の正答・配点・大問構成・完答ルールを判定して下のフォームに自動流し込みします。")
+            
+            # APIキーの準備（保存済みキーまたは画面入力キー）
+            active_api_key = saved_gemini_key or os.environ.get("GEMINI_API_KEY", "")
+            if not active_api_key:
+                st.warning("⚠️ Gemini APIキーが未設定です。下の入力欄または「⚙️ システム設定」画面でAPIキーを設定してください。")
+                active_api_key = st.text_input("Gemini API Key を入力", type="password", key="temp_gemini_key")
+
             master_img_file = st.file_uploader("模範解答画像を選択（JPG, PNG）", type=["jpg", "jpeg", "png"], key="master_img_uploader")
             
             if master_img_file is not None:
                 st.image(master_img_file, caption="アップロードした模範解答画像", width=400)
-                if st.button("この画像から正答・配点・大問を自動抽出する ▶", type="primary"):
-                    with st.spinner("模範解答画像を解析中..."):
-                        ext_data, msg = analyze_master_answer_sheet(master_img_file)
+                if st.button("🤖 この画像からAIで黒塗り正答・配点を自動抽出する ▶", type="primary"):
+                    with st.spinner("Gemini AIが黒塗り正答マスと配点を解析中..."):
+                        ext_data, msg = analyze_master_answer_sheet_ai(master_img_file, active_api_key)
                         if ext_data:
-                            # 1. 基本設定をセット
-                            save_test_config(target_test_id, ext_data["max_questions"], ext_data["total_score"])
+                            # 1. 基本設定（問題数・満点）を一括保存＆適用
+                            save_test_config(target_test_id, ext_data.get("max_questions", 37), ext_data.get("total_score", 100))
                             
-                            # 2. 大問設定をセット
+                            # 2. 大問設定を一括保存＆適用
                             if "sections" in ext_data:
                                 save_sections_config(target_test_id, ext_data["sections"])
                             
-                            # 3. 特殊完答ルールをセット
+                            # 3. 特殊完答ルールを一括保存＆適用
                             if "special_rules" in ext_data:
                                 save_special_rules(target_test_id, ext_data["special_rules"])
 
-                            # 4. 解答・配点を session_state に流し込む（フォームの初期値として人間が手動補正できるようにする）
+                            # 4. 解答・配点を一括保存＆session_stateへ流し込み（手動補正可能にする）
+                            save_answer_key(target_test_id, ext_data.get("answers", {}))
+                            save_points_key(target_test_id, ext_data.get("points", {}))
+
                             for q_k, a_v in ext_data.get("answers", {}).items():
                                 st.session_state[f"ans_{target_test_id}_{q_k}"] = int(a_v)
                             for q_k, p_v in ext_data.get("points", {}).items():
                                 st.session_state[f"pts_{target_test_id}_{q_k}"] = int(p_v)
 
-                            st.success(f"✅ {msg}")
-                            st.info("下のフォームに抽出結果が入力されました。誤りがある部分は直接フォームを変更して「一括保存」ボタンを押してください。")
+                            st.success(msg)
+                            st.info("💡 解析結果が下部の入力フォームに適用されました。間違っている箇所は直接書き換えて「一括保存」を押してください。")
                             st.rerun()
                         else:
                             st.error(msg)
@@ -971,7 +1029,7 @@ elif mode == "教員用（正解・配点・大問・特殊ルール設定）":
 
         st.markdown("---")
         st.markdown("##### 📚 2. 大問の区切り（セクション）設定")
-        st.caption("※「第1問: 問1〜6」「第2問: 問7〜14」のように区切ると、生徒の採点結果画面に大問別の小計とレーダーチャートが表示されます。")
+        st.caption("※「第1問: 問1〜7」「第2問: 問8〜11」のように区切ると、生徒の採点結果画面に大問別の小計とレーダーチャートが表示されます。")
         
         existing_sections = load_sections_config(target_test_id)
         
@@ -999,10 +1057,7 @@ elif mode == "教員用（正解・配点・大問・特殊ルール設定）":
             st.rerun()
 
         st.markdown("---")
-        st.markdown("##### 📝 3. 正答・配点の設定")
-
-        current_answers = load_answer_key(target_test_id, t_max_q)
-        current_points = load_points_key(target_test_id, t_max_q)
+        st.markdown("##### 📝 3. 特殊配点（完答ルール）の設定")
         
         current_rules = load_special_rules(target_test_id)
         
@@ -1019,47 +1074,6 @@ elif mode == "教員用（正解・配点・大問・特殊ルール設定）":
                     for q_num in range(r.get("extra_start", 1), r.get("extra_end", 1) + 1):
                         special_q_set.add(q_num)
 
-        st.markdown("###### 💡 配点の一括変更")
-        
-        col_bp1, col_bp2 = st.columns([2, 1])
-        bulk_val = col_bp1.number_input("全問の配点を一括変更（点）", min_value=0, max_value=50, value=2, step=1, key="bulk_all_pts")
-        if col_bp2.button("全問一括適用", type="secondary"):
-            new_bulk_pts = {f'Q{i}': (0 if i in special_q_set else int(bulk_val)) for i in range(1, t_max_q + 1)}
-            save_points_key(target_test_id, new_bulk_pts)
-            
-            for i in range(1, t_max_q + 1):
-                k = f"pts_{target_test_id}_Q{i}"
-                st.session_state[k] = 0 if i in special_q_set else int(bulk_val)
-            
-            st.success(f"TEST ID [{target_test_id}] の全問配点を {int(bulk_val)} 点に変更しました！")
-            st.rerun()
-
-        st.markdown("###### 🎯 範囲を指定して配点を一括変更")
-        col_r1, col_r2, col_r3, col_r4 = st.columns([1.5, 1.5, 1.5, 1.5])
-        start_q = col_r1.number_input("開始問", min_value=1, max_value=t_max_q, value=1, step=1)
-        end_q = col_r2.number_input("終了問", min_value=1, max_value=t_max_q, value=min(25, t_max_q), step=1)
-        range_val = col_r3.number_input("配点（点）", min_value=0, max_value=50, value=2, step=1, key="bulk_range_pts")
-        
-        if col_r4.button("範囲一括適用", type="secondary"):
-            if start_q > end_q:
-                st.error("開始問は終了問以下に設定してください。")
-            else:
-                curr_pts = load_points_key(target_test_id, t_max_q)
-                for i in range(int(start_q), int(end_q) + 1):
-                    q_k = f'Q{i}'
-                    if i in special_q_set:
-                        curr_pts[q_k] = 0
-                        st.session_state[f"pts_{target_test_id}_{q_k}"] = 0
-                    else:
-                        curr_pts[q_k] = int(range_val)
-                        st.session_state[f"pts_{target_test_id}_{q_k}"] = int(range_val)
-                save_points_key(target_test_id, curr_pts)
-                st.success(f"問{int(start_q)} 〜 問{int(end_q)} の配点を {int(range_val)} 点に変更しました！")
-                st.rerun()
-
-        st.markdown("---")
-        st.markdown("##### 🎯 4. 特殊配点（完答ルール）の設定")
-        
         rule_type_sel = st.radio(
             "追加する完答ルールのタイプを選択してください",
             ["通常完答 (例: 問18〜問21がすべて正解で4点)", "順不同＋指定問 完答 (例: 問37・38が順不同＋問39も正解で5点)"],
@@ -1132,10 +1146,52 @@ elif mode == "教員用（正解・配点・大問・特殊ルール設定）":
             st.caption("現在設定されている特殊ルールはありません。")
 
         st.markdown("---")
-        st.markdown(f"###### ✍️ 個別配点・正答の入力・手動補正 (問1 〜 問{t_max_q})")
-        st.caption("※ 模範解答画像を自動読み込みした場合は、誤っている数字や配点をここで直接変更して手動修正してください。")
+        st.markdown("##### 💡 配点の一括変更")
         
-        options = list(range(0, NUM_OPTS + 1))  # ⓪が含まれる場合にも対応（0〜9）
+        current_answers = load_answer_key(target_test_id, t_max_q)
+        current_points = load_points_key(target_test_id, t_max_q)
+
+        col_bp1, col_bp2 = st.columns([2, 1])
+        bulk_val = col_bp1.number_input("全問の配点を一括変更（点）", min_value=0, max_value=50, value=2, step=1, key="bulk_all_pts")
+        if col_bp2.button("全問一括適用", type="secondary"):
+            new_bulk_pts = {f'Q{i}': (0 if i in special_q_set else int(bulk_val)) for i in range(1, t_max_q + 1)}
+            save_points_key(target_test_id, new_bulk_pts)
+            
+            for i in range(1, t_max_q + 1):
+                k = f"pts_{target_test_id}_Q{i}"
+                st.session_state[k] = 0 if i in special_q_set else int(bulk_val)
+            
+            st.success(f"TEST ID [{target_test_id}] の全問配点を {int(bulk_val)} 点に変更しました！")
+            st.rerun()
+
+        st.markdown("###### 🎯 範囲を指定して配点を一括変更")
+        col_r1, col_r2, col_r3, col_r4 = st.columns([1.5, 1.5, 1.5, 1.5])
+        start_q = col_r1.number_input("開始問", min_value=1, max_value=t_max_q, value=1, step=1)
+        end_q = col_r2.number_input("終了問", min_value=1, max_value=t_max_q, value=min(25, t_max_q), step=1)
+        range_val = col_r3.number_input("配点（点）", min_value=0, max_value=50, value=2, step=1, key="bulk_range_pts")
+        
+        if col_r4.button("範囲一括適用", type="secondary"):
+            if start_q > end_q:
+                st.error("開始問は終了問以下に設定してください。")
+            else:
+                curr_pts = load_points_key(target_test_id, t_max_q)
+                for i in range(int(start_q), int(end_q) + 1):
+                    q_k = f'Q{i}'
+                    if i in special_q_set:
+                        curr_pts[q_k] = 0
+                        st.session_state[f"pts_{target_test_id}_{q_k}"] = 0
+                    else:
+                        curr_pts[q_k] = int(range_val)
+                        st.session_state[f"pts_{target_test_id}_{q_k}"] = int(range_val)
+                save_points_key(target_test_id, curr_pts)
+                st.success(f"問{int(start_q)} 〜 問{int(end_q)} の配点を {int(range_val)} 点に変更しました！")
+                st.rerun()
+
+        st.markdown("---")
+        st.markdown(f"###### ✍️ 個別配点・正答の入力・手動補正 (問1 〜 問{t_max_q})")
+        st.caption("※ 自動入力された正答・配点をここで直接変更して手動修正できます。")
+        
+        options = list(range(0, NUM_OPTS + 1))  # ⓪〜⑨ の選択肢
         new_answers = {}
         new_points = {}
 
@@ -1145,9 +1201,8 @@ elif mode == "教員用（正解・配点・大問・特殊ルール設定）":
             for i in range(1, min(26, t_max_q + 1)):
                 q_k = f'Q{i}'
                 
-                # 自動読み取り値または既存データを初期値に適用
                 curr_ans_val = int(st.session_state.get(f"ans_{target_test_id}_{q_k}", current_answers.get(q_k, 1)))
-                idx = options.index(curr_ans_val) if curr_ans_val in options else 1
+                idx = options.index(curr_ans_val) if curr_ans_val in options else 0
                 
                 q_c1, q_c2, q_c3 = st.columns([1, 2, 2])
                 q_c1.write(f"**問 {i}**")
@@ -1167,7 +1222,7 @@ elif mode == "教員用（正解・配点・大問・特殊ルール設定）":
                     q_k = f'Q{i}'
                     
                     curr_ans_val = int(st.session_state.get(f"ans_{target_test_id}_{q_k}", current_answers.get(q_k, 1)))
-                    idx = options.index(curr_ans_val) if curr_ans_val in options else 1
+                    idx = options.index(curr_ans_val) if curr_ans_val in options else 0
                     
                     q_c1, q_c2, q_c3 = st.columns([1, 2, 2])
                     q_c1.write(f"**問 {i}**")
@@ -1188,7 +1243,7 @@ elif mode == "教員用（正解・配点・大問・特殊ルール設定）":
         else:
             st.success(f"✅ **配点合計チェックOK**: 設定されている配点合計は **{calculated_total} 点**（目標満点: **{t_total_score} 点**）です。")
 
-        if st.button(f"TEST ID [{target_test_id}] の設定（正答・配点・大問）を一括保存する", type="primary", use_container_width=True):
+        if st.button(f"TEST ID [{target_test_id}] の設定（正答・配点・大問・完答）を一括保存する", type="primary", use_container_width=True):
             if calculated_total != t_total_score:
                 st.error(f"❌ 配点の合計（{calculated_total} 点）が基本設定の目標満点（{t_total_score} 点）と一致していません。配点を修正してから保存してください。")
             else:
@@ -1196,7 +1251,8 @@ elif mode == "教員用（正解・配点・大問・特殊ルール設定）":
                 save_points_key(target_test_id, new_points)
                 save_test_config(target_test_id, t_max_q, t_total_score)
                 save_sections_config(target_test_id, new_sections_list)
-                st.success(f"TEST ID [{target_test_id}] の設定（正答・配点・問題数・大問）を正常に保存しました！")
+                save_special_rules(target_test_id, current_rules)
+                st.success(f"TEST ID [{target_test_id}] の設定（正答・配点・問題数・大問・完答ルール）を正常に保存しました！")
                 st.rerun()
 
 elif mode == "教員用（集計・Excel出力）":
