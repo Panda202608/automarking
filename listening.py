@@ -199,23 +199,19 @@ def save_test_result_to_csv(row_data):
         df_all.to_csv(DATA_FILE, index=False, encoding='utf-8-sig')
 
 # ---------------------------------------------------------
-# 【ねじれ防止】4頂点（左上・右上・左下・右下）の自動正規化ソート
+# 4頂点の自動正規化ソート
 # ---------------------------------------------------------
 def order_points(pts):
-    """
-    傾きや順番のバラつきに関係なく、4つの点を確実に
-    [0:左上, 1:右上, 2:左下, 3:右下] の順番に整列させる関数
-    """
     pts = np.array(pts, dtype="float32")
     rect = np.zeros((4, 2), dtype="float32")
 
     s = pts.sum(axis=1)
-    rect[0] = pts[np.argmin(s)]  # 左上: x+y が最小
-    rect[3] = pts[np.argmax(s)]  # 右下: x+y が最大
+    rect[0] = pts[np.argmin(s)]  # 左上
+    rect[3] = pts[np.argmax(s)]  # 右下
 
     diff = np.diff(pts, axis=1)
-    rect[1] = pts[np.argmin(diff)] # 右上: y-x が最小
-    rect[2] = pts[np.argmax(diff)] # 左下: y-x が最大
+    rect[1] = pts[np.argmin(diff)] # 右上
+    rect[2] = pts[np.argmax(diff)] # 左下
 
     return rect
 
@@ -285,7 +281,7 @@ def auto_orient_and_get_markers(image):
     return image, markers, f"向き補正不可: {msg}"
 
 # ---------------------------------------------------------
-# メイン解析処理（生徒マークシート用・ねじれ補正適用）
+# メイン解析処理（生徒マークシート用・枠線干渉防止修正）
 # ---------------------------------------------------------
 def analyze_mark_sheet(image_file, max_q=50, num_opts=9):
     logs = []
@@ -302,7 +298,6 @@ def analyze_mark_sheet(image_file, max_q=50, num_opts=9):
     gray = cv2.cvtColor(oriented_img, cv2.COLOR_BGR2GRAY)
     debug_main = oriented_img.copy()
 
-    # ★ 4頂点の自動正規化（order_points）を通すことで絶対にねじれない切り出しを実行
     def warp_block(pts_4, target_w, target_h):
         ordered_pts = order_points(pts_4)
         pts_src = np.array(ordered_pts, dtype="float32")
@@ -340,8 +335,8 @@ def analyze_mark_sheet(image_file, max_q=50, num_opts=9):
                 cx = (col_idx + 0.5) * col_w
                 for row_idx in range(10):
                     cy = y_offset + (row_idx + 0.5) * row_h
-                    x1, x2 = int(cx - col_w * 0.25), int(cx + col_w * 0.25)
-                    y1, y2 = int(cy - row_h * 0.25), int(cy + row_h * 0.25)
+                    x1, x2 = int(cx - col_w * 0.2), int(cx + col_w * 0.2)
+                    y1, y2 = int(cy - row_h * 0.2), int(cy + row_h * 0.2)
                     
                     roi = bin_exam[y1:y2, x1:x2]
                     cnt = cv2.countNonZero(roi)
@@ -360,10 +355,16 @@ def analyze_mark_sheet(image_file, max_q=50, num_opts=9):
             recognized_exam_id = "".join(parsed_digits[2:])
             logs.append(f"IDブロック読み取り完了 -> テストID: {recognized_test_id} / STUDENT ID: {recognized_exam_id}")
 
+            # ★ 選択肢9が右端枠線に干渉しないよう座標・判定エリアを内側に厳密修正
             def parse_q_range(bin_img, color_img, start_q_idx):
                 debug_img = color_img.copy()
                 qw, qh = bin_img.shape[1], bin_img.shape[0]
-                col_w = qw / 10.0
+                
+                # 解答領域の分割計算（左右の余白を安全に除外）
+                usable_w = qw * 0.88  # 左右枠線を除外した有効幅
+                x_start_offset = qw * 0.08
+                col_w = usable_w / float(num_opts)
+                
                 row_h = (qh - 70.0) / 25.0
                 y_offset = 35.0
 
@@ -377,9 +378,11 @@ def analyze_mark_sheet(image_file, max_q=50, num_opts=9):
                     boxes = []
                     
                     for opt in range(1, num_opts + 1):
-                        cx = (opt + 0.3) * col_w
-                        x1, x2 = int(cx - col_w * 0.22), int(cx + col_w * 0.22)
-                        y1, y2 = int(cy - row_h * 0.25), int(cy + row_h * 0.25)
+                        cx = x_start_offset + (opt - 0.5) * col_w
+                        
+                        # ROI（測定ボックス）を中心部の15%程度に厳密限定（枠線や印刷線の混入を防ぐ）
+                        x1, x2 = int(cx - col_w * 0.16), int(cx + col_w * 0.16)
+                        y1, y2 = int(cy - row_h * 0.20), int(cy + row_h * 0.20)
                         
                         roi = bin_img[y1:y2, x1:x2]
                         cnt = cv2.countNonZero(roi)
@@ -391,7 +394,8 @@ def analyze_mark_sheet(image_file, max_q=50, num_opts=9):
                     for opt_idx, cnt in enumerate(counts):
                         others = [c for j, c in enumerate(counts) if j != opt_idx]
                         avg_other = sum(others) / float(len(others)) if others else 0
-                        if cnt > 30 and cnt > (avg_other * 1.6 + 10):
+                        # マーク判定条件の厳格化
+                        if cnt > 25 and cnt > (avg_other * 1.8 + 15):
                             valid_opts.append(opt_idx + 1)
 
                     if len(valid_opts) == 1:
@@ -797,10 +801,7 @@ if mode == "📱 生徒用（解答・採点・統計）":
                     ))
                     
                     fig.update_layout(
-                        polar=dict(
-                            radialaxis=dict(visible=True, range=[0, 100], ticksuffix="%", gridcolor="#cbd5e1"),
-                            angularaxis=dict(gridcolor="#cbd5e1")
-                        ),
+                        polar=dict(radialaxis=dict(visible=True, range=[0, 100], ticksuffix="%", gridcolor="#cbd5e1"), angularaxis=dict(gridcolor="#cbd5e1")),
                         showlegend=False,
                         margin=dict(l=50, r=50, t=30, b=30),
                         height=360,
