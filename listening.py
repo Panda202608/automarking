@@ -381,8 +381,9 @@ def analyze_mark_sheet(image_file, max_q=50, num_opts=9):
                     
                     for opt in range(1, num_opts + 1):
                         cx = x_start_offset + (opt - 0.5) * col_w
-                        x1, x2 = int(cx - col_w * 0.2), int(cx + col_w * 0.2)
-                        y1, y2 = int(cy - row_h * 0.25), int(cy + row_h * 0.25)
+                        # 変更点: ROIの係数を小さくし、枠線や影を拾いにくくする
+                        x1, x2 = int(cx - col_w * 0.15), int(cx + col_w * 0.15)
+                        y1, y2 = int(cy - row_h * 0.2), int(cy + row_h * 0.2)
                         
                         roi = bin_img[y1:y2, x1:x2]
                         cnt = cv2.countNonZero(roi)
@@ -392,7 +393,8 @@ def analyze_mark_sheet(image_file, max_q=50, num_opts=9):
 
                     # 安定の黒ピクセル判定
                     max_cnt = max(counts) if counts else 0
-                    MIN_PIXELS = 120  # ここが低すぎると影を拾う、高すぎると読み落とす
+                    # 変更点: 閾値を120から200に引き上げ
+                    MIN_PIXELS = 200  
                     
                     if max_cnt < MIN_PIXELS:
                         best_opt = "未マーク/無効"
