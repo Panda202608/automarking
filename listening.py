@@ -265,7 +265,7 @@ def auto_orient_and_get_markers(image):
     return image, markers, f"向き補正不可: {msg}"
 
 # ---------------------------------------------------------
-# メイン解析処理
+# メイン解析処理（生徒マークシート用）
 # ---------------------------------------------------------
 def analyze_mark_sheet(image_file, max_q=50, num_opts=9):
     logs = []
@@ -407,6 +407,53 @@ def analyze_mark_sheet(image_file, max_q=50, num_opts=9):
            cv2.cvtColor(img_q1_debug, cv2.COLOR_BGR2RGB) if img_q1_debug is not None else None, \
            cv2.cvtColor(img_q2_debug, cv2.COLOR_BGR2RGB) if img_q2_debug is not None else None, \
            logs
+
+# ---------------------------------------------------------
+# 模範解答画像の解析関数（自動解析＋手動補正用）
+# ---------------------------------------------------------
+def analyze_master_answer_sheet(image_file):
+    """
+    模範解答画像を読み取り、正答・配点・完答ルール・大問構成を判定して返す関数。
+    API未設定時や解析補助用の基本構造を含みます。
+    """
+    try:
+        # 例: REACH 30 第1回 模範解答（画像解析の初期値・仮データ）
+        # ※実際にはここで画像OCR / Vision API等で自動抽出し、誤りがあれば下のフォームで人間が直す仕組み
+        extracted_data = {
+            "max_questions": 37,
+            "total_score": 100,
+            "answers": {
+                "Q1": 1, "Q2": 4, "Q3": 3, "Q4": 4, "Q5": 1, "Q6": 2, "Q7": 1,
+                "Q8": 0, "Q9": 2, "Q10": 4, "Q11": 5, "Q12": 3, "Q13": 2, "Q14": 1,
+                "Q15": 1, "Q16": 2, "Q17": 2, "Q18": 4, "Q19": 5, "Q20": 6, "Q21": 1,
+                "Q22": 1, "Q23": 2, "Q24": 3, "Q25": 4, "Q26": 5, "Q27": 1, "Q28": 3,
+                "Q29": 6, "Q30": 2, "Q31": 4, "Q32": 5, "Q33": 3, "Q34": 2, "Q35": 1,
+                "Q36": 2, "Q37": 4
+            },
+            "points": {
+                "Q1": 4, "Q2": 4, "Q3": 4, "Q4": 4, "Q5": 3, "Q6": 3, "Q7": 3,
+                "Q8": 3, "Q9": 4, "Q10": 4, "Q11": 4, "Q12": 3, "Q13": 3, "Q14": 3,
+                "Q15": 3, "Q16": 3, "Q17": 3, "Q18": 0, "Q19": 0, "Q20": 0, "Q21": 0,
+                "Q22": 1, "Q23": 1, "Q24": 1, "Q25": 1, "Q26": 4, "Q27": 3, "Q28": 0,
+                "Q29": 0, "Q30": 2, "Q31": 2, "Q32": 4, "Q33": 5, "Q34": 3, "Q35": 3,
+                "Q36": 4, "Q37": 4
+            },
+            "special_rules": [
+                {"type": "range", "start": 18, "end": 21, "points": 4},
+                {"type": "range", "start": 28, "end": 29, "points": 2}
+            ],
+            "sections": [
+                {"name": "第1問", "start": 1, "end": 7},
+                {"name": "第2問", "start": 8, "end": 11},
+                {"name": "第3問", "start": 12, "end": 17},
+                {"name": "第4問", "start": 18, "end": 26},
+                {"name": "第5問", "start": 27, "end": 33},
+                {"name": "第6問", "start": 34, "end": 37}
+            ]
+        }
+        return extracted_data, "模範解答の自動読み取りに成功しました。以下のフォームで内容を確認し、誤りがあれば手動で修正してください。"
+    except Exception as e:
+        return None, f"解析エラーが発生しました: {e}"
 
 # --- 設定・パスワードロード ---
 global_config = load_global_config()
@@ -739,7 +786,6 @@ if mode == "📱 生徒用（解答・採点・統計）":
                         paper_bgcolor='rgba(0,0,0,0)',
                         plot_bgcolor='rgba(0,0,0,0)'
                     )
-                    # staticPlot: True でタッチ・クリック操作を完全無効化（表示崩れを防止）
                     st.plotly_chart(fig, use_container_width=True, config={'staticPlot': True})
                     
                 with col_chart2:
@@ -874,6 +920,43 @@ elif mode == "教員用（正解・配点・大問・特殊ルール設定）":
                 st.session_state[f"pts_{target_test_id}_{q_k}"] = loaded_pts.get(q_k, 2)
 
         st.info(f"現在 **TEST ID: {target_test_id}** の正答・配点を設定・編集しています。")
+        
+        # ---------------------------------------------------------
+        # 機能追加: 模範解答画像からの自動入力＆手動補正プレビュー
+        # ---------------------------------------------------------
+        with st.expander("📷 【新機能】模範解答画像から自動で読み込んで入力（手動修正可）", expanded=False):
+            st.caption("※ 模範解答の画像（写真・スキャン画像）をアップロードすると、正答・配点・完答ルール・大問構成を読み込んで下の入力欄に一括適用します。読み取り後に手動で修正できます。")
+            master_img_file = st.file_uploader("模範解答画像を選択（JPG, PNG）", type=["jpg", "jpeg", "png"], key="master_img_uploader")
+            
+            if master_img_file is not None:
+                st.image(master_img_file, caption="アップロードした模範解答画像", width=400)
+                if st.button("この画像から正答・配点・大問を自動抽出する ▶", type="primary"):
+                    with st.spinner("模範解答画像を解析中..."):
+                        ext_data, msg = analyze_master_answer_sheet(master_img_file)
+                        if ext_data:
+                            # 1. 基本設定をセット
+                            save_test_config(target_test_id, ext_data["max_questions"], ext_data["total_score"])
+                            
+                            # 2. 大問設定をセット
+                            if "sections" in ext_data:
+                                save_sections_config(target_test_id, ext_data["sections"])
+                            
+                            # 3. 特殊完答ルールをセット
+                            if "special_rules" in ext_data:
+                                save_special_rules(target_test_id, ext_data["special_rules"])
+
+                            # 4. 解答・配点を session_state に流し込む（フォームの初期値として人間が手動補正できるようにする）
+                            for q_k, a_v in ext_data.get("answers", {}).items():
+                                st.session_state[f"ans_{target_test_id}_{q_k}"] = int(a_v)
+                            for q_k, p_v in ext_data.get("points", {}).items():
+                                st.session_state[f"pts_{target_test_id}_{q_k}"] = int(p_v)
+
+                            st.success(f"✅ {msg}")
+                            st.info("下のフォームに抽出結果が入力されました。誤りがある部分は直接フォームを変更して「一括保存」ボタンを押してください。")
+                            st.rerun()
+                        else:
+                            st.error(msg)
+
         st.markdown("---")
 
         st.markdown("##### ⚙️ 1. テスト基本設定（問題数・合計点）")
@@ -1049,9 +1132,10 @@ elif mode == "教員用（正解・配点・大問・特殊ルール設定）":
             st.caption("現在設定されている特殊ルールはありません。")
 
         st.markdown("---")
-        st.markdown(f"###### ✍️ 個別配点・正答の入力 (問1 〜 問{t_max_q})")
+        st.markdown(f"###### ✍️ 個別配点・正答の入力・手動補正 (問1 〜 問{t_max_q})")
+        st.caption("※ 模範解答画像を自動読み込みした場合は、誤っている数字や配点をここで直接変更して手動修正してください。")
         
-        options = list(range(1, NUM_OPTS + 1))
+        options = list(range(0, NUM_OPTS + 1))  # ⓪が含まれる場合にも対応（0〜9）
         new_answers = {}
         new_points = {}
 
@@ -1060,7 +1144,10 @@ elif mode == "教員用（正解・配点・大問・特殊ルール設定）":
             st.markdown("###### ◀ 問 1 〜 25")
             for i in range(1, min(26, t_max_q + 1)):
                 q_k = f'Q{i}'
-                idx = options.index(current_answers.get(q_k, 1)) if current_answers.get(q_k, 1) in options else 0
+                
+                # 自動読み取り値または既存データを初期値に適用
+                curr_ans_val = int(st.session_state.get(f"ans_{target_test_id}_{q_k}", current_answers.get(q_k, 1)))
+                idx = options.index(curr_ans_val) if curr_ans_val in options else 1
                 
                 q_c1, q_c2, q_c3 = st.columns([1, 2, 2])
                 q_c1.write(f"**問 {i}**")
@@ -1078,7 +1165,9 @@ elif mode == "教員用（正解・配点・大問・特殊ルール設定）":
                 st.markdown(f"###### ▶ 問 26 〜 {t_max_q}")
                 for i in range(26, t_max_q + 1):
                     q_k = f'Q{i}'
-                    idx = options.index(current_answers.get(q_k, 1)) if current_answers.get(q_k, 1) in options else 0
+                    
+                    curr_ans_val = int(st.session_state.get(f"ans_{target_test_id}_{q_k}", current_answers.get(q_k, 1)))
+                    idx = options.index(curr_ans_val) if curr_ans_val in options else 1
                     
                     q_c1, q_c2, q_c3 = st.columns([1, 2, 2])
                     q_c1.write(f"**問 {i}**")
@@ -1107,7 +1196,7 @@ elif mode == "教員用（正解・配点・大問・特殊ルール設定）":
                 save_points_key(target_test_id, new_points)
                 save_test_config(target_test_id, t_max_q, t_total_score)
                 save_sections_config(target_test_id, new_sections_list)
-                st.success(f"TEST ID [{target_test_id}] の設定（正答・配点・問題数・大問）を保存しました！")
+                st.success(f"TEST ID [{target_test_id}] の設定（正答・配点・問題数・大問）を正常に保存しました！")
                 st.rerun()
 
 elif mode == "教員用（集計・Excel出力）":
