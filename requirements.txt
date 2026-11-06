@@ -3,6 +3,7 @@ pandas
 opencv-python-headless
 numpy
 Pillow
-openpyxl
 plotly
 filelock
+google-generativeai
+openpyxl
