@@ -281,7 +281,7 @@ def auto_orient_and_get_markers(image):
     return image, markers, f"向き補正不可: {msg}"
 
 # ---------------------------------------------------------
-# メイン解析処理（Otsuの2値化による安定版ロジック）
+# メイン解析処理
 # ---------------------------------------------------------
 def analyze_mark_sheet(image_file, max_q=50, num_opts=9):
     logs = []
@@ -307,7 +307,6 @@ def analyze_mark_sheet(image_file, max_q=50, num_opts=9):
         warped_g = cv2.warpPerspective(gray, M, (target_w, target_h))
         warped_c = cv2.warpPerspective(oriented_img, M, (target_w, target_h))
         
-        # 安定のOtsuの2値化ロジック
         _, bin_out = cv2.threshold(warped_g, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
         return bin_out, warped_c
 
@@ -346,7 +345,7 @@ def analyze_mark_sheet(image_file, max_q=50, num_opts=9):
                     cv2.rectangle(img_exam_debug, (x1, y1), (x2, y2), (255, 165, 0), 1)
 
                 max_cnt = max(counts)
-                if max_cnt > 150: # ピクセルしきい値
+                if max_cnt > 150: 
                     best_idx = counts.index(max_cnt)
                     best_d = digits[best_idx]
                     best_box = boxes[best_idx]
@@ -381,7 +380,6 @@ def analyze_mark_sheet(image_file, max_q=50, num_opts=9):
                     
                     for opt in range(1, num_opts + 1):
                         cx = x_start_offset + (opt - 0.5) * col_w
-                        # 変更点: ROIの係数を小さくし、枠線や影を拾いにくくする
                         x1, x2 = int(cx - col_w * 0.15), int(cx + col_w * 0.15)
                         y1, y2 = int(cy - row_h * 0.2), int(cy + row_h * 0.2)
                         
@@ -391,9 +389,7 @@ def analyze_mark_sheet(image_file, max_q=50, num_opts=9):
                         boxes.append((x1, y1, x2, y2))
                         cv2.rectangle(debug_img, (x1, y1), (x2, y2), (200, 200, 200), 1)
 
-                    # 安定の黒ピクセル判定
                     max_cnt = max(counts) if counts else 0
-                    # 変更点: 閾値を120から200に引き上げ
                     MIN_PIXELS = 200  
                     
                     if max_cnt < MIN_PIXELS:
@@ -435,7 +431,7 @@ def analyze_mark_sheet(image_file, max_q=50, num_opts=9):
            logs
 
 # ---------------------------------------------------------
-# 模範解答 AI自動読み取り関数 (Gemini API)
+# 模範解答 AI自動読み取り関数
 # ---------------------------------------------------------
 def analyze_master_answer_sheet_ai(image_file, api_key):
     if not HAS_GENAI:
@@ -760,6 +756,7 @@ if mode == "📱 生徒用（解答・採点・統計）":
             
             t_cfg = load_test_config(test_id)
             target_total = t_cfg.get("total_score", 100)
+            t_max_q = t_cfg.get("max_questions", MAX_Q)
 
             st.balloons()
             st.metric(label=f"【TEST ID: {test_id} / STUDENT ID: {student_id}】 さんの総合点", value=f"{total_score} 点 / {target_total} 点")
@@ -819,7 +816,39 @@ if mode == "📱 生徒用（解答・採点・統計）":
 
             st.markdown("---")
             st.write("**【設問別 正誤一覧】**")
-            st.dataframe(pd.DataFrame(results_list), height=350, use_container_width=True)
+            
+            # --- ここからスタイリング・正答率計算の追加処理 ---
+            df_all = safe_read_csv(DATA_FILE)
+            question_acc = {}
+            if not df_all.empty and 'TEST ID' in df_all.columns:
+                df_all['TEST ID'] = df_all['TEST ID'].astype(str).str.strip().str.replace(r'\.0$', '', regex=True).str.zfill(2)
+                df_test = df_all[df_all['TEST ID'] == test_id]
+                if not df_test.empty:
+                    for i in range(1, t_max_q + 1):
+                        q = f'Q{i}'
+                        corr_col = f'{q}_正誤'
+                        if corr_col in df_test.columns:
+                            acc = pd.to_numeric(df_test[corr_col], errors='coerce').mean() * 100
+                            question_acc[q] = acc
+            
+            def highlight_rows(row):
+                q = row['問題']
+                status = row['判定']
+                acc = question_acc.get(q, 0.0)
+                
+                if status == '✕' or status == '×':
+                    if acc > 80.0:
+                        # 全体の正答率が80%超えなのに間違えた場合（赤系）
+                        return ['background-color: #ffebee; color: #b71c1c'] * len(row)
+                    else:
+                        # 通常の不正解（黄色）
+                        return ['background-color: #fff9c4; color: #f57f17'] * len(row)
+                return [''] * len(row)
+
+            res_df = pd.DataFrame(results_list)
+            # hide_index=True を使用して一番左のインデックス(0,1,2...)を非表示にする
+            st.dataframe(res_df.style.apply(highlight_rows, axis=1), height=350, use_container_width=True, hide_index=True)
+            # --- 追加処理ここまで ---
 
             st.markdown("---")
             if st.button("次の解答を採点する ▶", type="primary", use_container_width=True):
