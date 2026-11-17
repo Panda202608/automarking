@@ -852,7 +852,6 @@ if mode == "📱 生徒用（解答・採点・統計）":
                 return [''] * len(row)
 
             res_df = pd.DataFrame(results_list)
-            # use_container_width=True を外して文字数に合わせたコンパクトな横幅にする
             st.dataframe(res_df.style.apply(highlight_rows, axis=1), hide_index=True)
 
             st.markdown("---")
@@ -900,7 +899,6 @@ if mode == "📱 生徒用（解答・採点・統計）":
 
                     stat_table.append({'問題': q, '正解': correct_val, '全体正答率': f"{acc:.1f}%"})
 
-                # use_container_width=True を外して文字数に合わせたコンパクトな横幅にする
                 st.dataframe(pd.DataFrame(stat_table), height=400, hide_index=True)
             else:
                 st.info("選択された TEST ID のデータはまだありません。")
@@ -950,7 +948,8 @@ elif mode == "教員用（正解・配点・大問・特殊ルール設定）":
     with tab1:
         st.subheader("📝 TEST ID 別 正答・配点・大問管理")
         all_ans_data = load_json_file(ANSWER_KEY_FILE, {})
-        existing_test_ids = sorted(list(all_ans_data.keys()))
+        all_pts_data = load_json_file(POINTS_KEY_FILE, {})
+        existing_test_ids = sorted(list(set(list(all_ans_data.keys()) + list(all_pts_data.keys()))))
         if not existing_test_ids: existing_test_ids = ["01"]
 
         col_tid1, col_tid2 = st.columns([2, 2])
@@ -1088,6 +1087,58 @@ elif mode == "教員用（正解・配点・大問・特殊ルール設定）":
 
         st.markdown("---")
         st.markdown(f"###### ✍️ 個別配点・正答の入力・手動補正 (問1 〜 問{t_max_q})")
+
+        # ★ 便利ツールボックス（他TEST IDからの配点コピー & 範囲一括設定）
+        with st.container(border=True):
+            st.markdown("**⚡ 配点入力の時短ツール**")
+            
+            # 1. 他の TEST ID から配点をコピー
+            copy_candidates = [tid for tid in existing_test_ids if tid != target_test_id]
+            if not copy_candidates:
+                copy_candidates = existing_test_ids
+
+            col_cp1, col_cp2 = st.columns([2, 1.5])
+            with col_cp1:
+                src_test_id = st.selectbox(
+                    "コピー元の TEST ID を選択",
+                    options=copy_candidates,
+                    key=f"copy_src_{target_test_id}"
+                )
+            with col_cp2:
+                st.write("")
+                st.write("")
+                if st.button("📋 この TEST ID から配点をコピー", key=f"btn_copy_pts_{target_test_id}", use_container_width=True):
+                    src_pts_dict = load_points_key(src_test_id, t_max_q)
+                    for i in range(1, t_max_q + 1):
+                        if i not in special_q_set:
+                            q_k = f'Q{i}'
+                            st.session_state[f"pts_{target_test_id}_{q_k}"] = int(src_pts_dict.get(q_k, 2))
+                    st.success(f"TEST ID [{src_test_id}] の配点をコピーしました！（最後に下の「一括保存」を押してください）")
+                    st.rerun()
+
+            st.markdown("---")
+
+            # 2. 問○〜問×をまとめて△点に設定
+            col_bk1, col_bk2, col_bk3, col_bk4 = st.columns([1, 1, 1, 1.5])
+            with col_bk1:
+                bulk_start = st.number_input("開始問", min_value=1, max_value=t_max_q, value=1, step=1, key=f"bulk_s_{target_test_id}")
+            with col_bk2:
+                bulk_end = st.number_input("終了問", min_value=1, max_value=t_max_q, value=t_max_q, step=1, key=f"bulk_e_{target_test_id}")
+            with col_bk3:
+                bulk_pts = st.number_input("配点 (点)", min_value=0, max_value=50, value=2, step=1, key=f"bulk_p_{target_test_id}")
+            with col_bk4:
+                st.write("")
+                st.write("")
+                if st.button("🔢 まとめて配点を設定", key=f"btn_bulk_pts_{target_test_id}", use_container_width=True):
+                    if bulk_start > bulk_end:
+                        st.error("開始問は終了問以下にしてください。")
+                    else:
+                        for i in range(int(bulk_start), int(bulk_end) + 1):
+                            if i not in special_q_set:
+                                q_k = f'Q{i}'
+                                st.session_state[f"pts_{target_test_id}_{q_k}"] = int(bulk_pts)
+                        st.success(f"問{bulk_start}〜問{bulk_end}を {bulk_pts}点 に設定しました！（最後に下の「一括保存」を押してください）")
+                        st.rerun()
         
         current_answers = load_answer_key(target_test_id, t_max_q)
         current_points = load_points_key(target_test_id, t_max_q)
@@ -1159,7 +1210,6 @@ elif mode == "教員用（集計・Excel出力）":
     unique_test_ids = get_clean_unique_test_ids(df)
     
     if unique_test_ids:
-        # 元のCSVの行番号（削除時に特定するため）を保持
         df['_orig_idx'] = df.index
         df['TEST ID'] = df['TEST ID'].astype(str).str.strip().str.replace(r'\.0$', '', regex=True).str.zfill(2)
         if 'STUDENT ID' in df.columns:
@@ -1189,7 +1239,6 @@ elif mode == "教員用（集計・Excel出力）":
         st.subheader("1. 個人別解答・得点一覧 (Student ID 順)")
         st.caption("💡 テストデータや重複登録されたデータなど、不要な行の左端にある「削除選択」にチェックを入れて「選択した行を削除」を押すとデータを消去できます。")
 
-        # 削除用チェックボックス列を先頭に追加
         df_edit = df_display.drop(columns=['_orig_idx']).copy()
         df_edit.insert(0, '削除選択', False)
 
@@ -1201,7 +1250,6 @@ elif mode == "教員用（集計・Excel出力）":
             key=f"editor_{selected_test_id}"
         )
 
-        # チェックされた行の元のCSVインデックスを取得
         selected_rows_mask = edited_df['削除選択'] == True
         if selected_rows_mask.any():
             num_selected = int(selected_rows_mask.sum())
