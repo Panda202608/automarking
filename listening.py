@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import json
 import os
+import io
 import cv2
 import numpy as np
 from PIL import Image, ImageOps
@@ -14,6 +15,12 @@ try:
     HAS_GENAI = True
 except ImportError:
     HAS_GENAI = False
+
+try:
+    import openpyxl
+    HAS_OPENPYXL = True
+except ImportError:
+    HAS_OPENPYXL = False
 
 # --- データ保存用ファイルパス ---
 DATA_FILE = "test_results.csv"
@@ -164,6 +171,225 @@ def save_special_rules(test_id, rules_list):
     t_key = str(test_id).zfill(2)
     data[t_key] = rules_list
     save_json_file(RULES_KEY_FILE, data)
+
+# --- テスト設定CSV エクスポート・インポート用関数 ---
+def export_test_settings_csv(test_id):
+    t_cfg = load_test_config(test_id)
+    max_q = int(t_cfg.get("max_questions", 37))
+    total_sc = int(t_cfg.get("total_score", 100))
+    ans_dict = load_answer_key(test_id, max_q)
+    pts_dict = load_points_key(test_id, max_q)
+    sections_list = load_sections_config(test_id)
+    rules_list = load_special_rules(test_id)
+
+    rows = []
+    rows.append({
+        "種別": "CONFIG",
+        "項目1": "基本設定",
+        "項目2": max_q,
+        "項目3": total_sc,
+        "項目4": ""
+    })
+    for sec in sections_list:
+        rows.append({
+            "種別": "SECTION",
+            "項目1": sec.get("name", ""),
+            "項目2": sec.get("start", 1),
+            "項目3": sec.get("end", 1),
+            "項目4": ""
+        })
+    for r in rules_list:
+        r_type = r.get("type", "range")
+        if r_type == "range":
+            rows.append({
+                "種別": "RULE",
+                "項目1": "range",
+                "項目2": r.get("start", 1),
+                "項目3": r.get("end", 1),
+                "項目4": r.get("points", 0)
+            })
+        elif r_type == "unordered_combo":
+            rows.append({
+                "種別": "RULE_JSON",
+                "項目1": json.dumps(r, ensure_ascii=False),
+                "項目2": "",
+                "項目3": "",
+                "項目4": ""
+            })
+    for i in range(1, max_q + 1):
+        q_k = f"Q{i}"
+        rows.append({
+            "種別": "QUESTION",
+            "項目1": q_k,
+            "項目2": ans_dict.get(q_k, 1),
+            "項目3": pts_dict.get(q_k, 2),
+            "項目4": ""
+        })
+
+    df_out = pd.DataFrame(rows)
+    return df_out.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
+
+def import_test_settings_csv(uploaded_csv, target_test_id):
+    try:
+        try:
+            df_in = pd.read_csv(uploaded_csv, encoding="utf-8-sig")
+        except Exception:
+            uploaded_csv.seek(0)
+            df_in = pd.read_csv(uploaded_csv, encoding="cp932")
+
+        if "種別" not in df_in.columns:
+            return False, "CSVの形式が正しくありません（「種別」列が見つかりません）。"
+
+        max_q = 37
+        total_sc = 100
+        new_sections = []
+        new_rules = []
+        new_ans = {}
+        new_pts = {}
+
+        for _, row in df_in.iterrows():
+            r_kind = str(row.get("種別", "")).strip()
+            v1 = row.get("項目1", "")
+            v2 = row.get("項目2", "")
+            v3 = row.get("項目3", "")
+            v4 = row.get("項目4", "")
+
+            if r_kind == "CONFIG":
+                if pd.notna(v2) and str(v2).strip() != "":
+                    max_q = int(float(v2))
+                if pd.notna(v3) and str(v3).strip() != "":
+                    total_sc = int(float(v3))
+            elif r_kind == "SECTION":
+                new_sections.append({
+                    "name": str(v1).strip(),
+                    "start": int(float(v2)),
+                    "end": int(float(v3))
+                })
+            elif r_kind == "RULE":
+                if str(v1).strip() == "range":
+                    new_rules.append({
+                        "type": "range",
+                        "start": int(float(v2)),
+                        "end": int(float(v3)),
+                        "points": int(float(v4))
+                    })
+            elif r_kind == "RULE_JSON":
+                new_rules.append(json.loads(str(v1)))
+            elif r_kind == "QUESTION":
+                q_str = str(v1).strip().upper()
+                if not q_str.startswith("Q"):
+                    q_str = f"Q{int(float(q_str))}"
+                new_ans[q_str] = int(float(v2)) if pd.notna(v2) and str(v2).strip() != "" else 1
+                new_pts[q_str] = int(float(v3)) if pd.notna(v3) and str(v3).strip() != "" else 0
+
+        if not new_ans:
+            return False, "設問データ（QUESTION行）がCSV内に見つかりませんでした。"
+
+        q_nums = [int(k.replace("Q", "")) for k in new_ans.keys() if k.replace("Q", "").isdigit()]
+        if q_nums:
+            max_q = max(max_q, max(q_nums))
+
+        save_test_config(target_test_id, max_q, total_sc)
+        save_sections_config(target_test_id, new_sections)
+        save_special_rules(target_test_id, new_rules)
+        save_answer_key(target_test_id, new_ans)
+        save_points_key(target_test_id, new_pts)
+
+        for i in range(1, 51):
+            q_k = f"Q{i}"
+            st.session_state[f"ans_{target_test_id}_{q_k}"] = new_ans.get(q_k, 1)
+            st.session_state[f"pts_{target_test_id}_{q_k}"] = new_pts.get(q_k, 2)
+
+        return True, f"✅ CSVから TEST ID [{target_test_id}] の設定（全{max_q}問・満点{total_sc}点）を読み込みました！"
+    except Exception as e:
+        return False, f"CSV読み込みエラー: {e}"
+
+# --- 生徒成績データのインポート用関数 ---
+def import_student_results_file(uploaded_file, replace_existing=False):
+    try:
+        filename = uploaded_file.name.lower()
+        if filename.endswith(".xlsx") or filename.endswith(".xls"):
+            if not HAS_OPENPYXL:
+                return False, "Excelファイルを読み込むライブラリ（openpyxl）がサーバーに入っていないため、CSV形式でアップロードしてください。"
+            df_in = pd.read_excel(uploaded_file, dtype={'TEST ID': str, 'STUDENT ID': str})
+        else:
+            try:
+                df_in = pd.read_csv(uploaded_file, encoding="utf-8-sig", dtype={'TEST ID': str, 'STUDENT ID': str})
+            except Exception:
+                uploaded_file.seek(0)
+                df_in = pd.read_csv(uploaded_file, encoding="cp932", dtype={'TEST ID': str, 'STUDENT ID': str})
+
+        if df_in.empty:
+            return False, "アップロードされたファイルにデータが含まれていません。"
+
+        # 不要な管理用列があれば除去
+        drop_cols = [c for c in ['削除選択', '_orig_idx'] if c in df_in.columns]
+        if drop_cols:
+            df_in = df_in.drop(columns=drop_cols)
+
+        required_cols = {'TEST ID', 'STUDENT ID', '合計点'}
+        if not required_cols.issubset(set(df_in.columns)):
+            return False, f"ファイルの列名が一致しません。必須列: {', '.join(required_cols)}"
+
+        # IDの正規化（01, 0101形式に揃える）
+        df_in['TEST ID'] = df_in['TEST ID'].astype(str).str.strip().str.replace(r'\.0$', '', regex=True).str.zfill(2)
+        df_in['STUDENT ID'] = df_in['STUDENT ID'].astype(str).str.strip().str.replace(r'\.0$', '', regex=True).str.zfill(4)
+        if '日時' not in df_in.columns:
+            df_in.insert(0, '日時', datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+        else:
+            df_in['日時'] = df_in['日時'].fillna(datetime.now().strftime('%Y-%m-%d %H:%M:%S')).astype(str)
+
+        target_tids = df_in['TEST ID'].unique().tolist()
+
+        lock = FileLock(LOCK_FILE, timeout=10)
+        with lock:
+            df_existing = safe_read_csv(DATA_FILE)
+            if not df_existing.empty:
+                df_existing['TEST ID'] = df_existing['TEST ID'].astype(str).str.strip().str.replace(r'\.0$', '', regex=True).str.zfill(2)
+                df_existing['STUDENT ID'] = df_existing['STUDENT ID'].astype(str).str.strip().str.replace(r'\.0$', '', regex=True).str.zfill(4)
+
+                if replace_existing:
+                    # インポートファイルに含まれる TEST ID の既存データを削除して入れ替える
+                    df_base = df_existing[~df_existing['TEST ID'].isin(target_tids)].copy()
+                    df_combined = pd.concat([df_base, df_in], ignore_index=True)
+                    added_count = len(df_in)
+                    skipped_count = 0
+                else:
+                    # 重複（TEST ID + STUDENT ID + 日時 が完全一致）をスキップして追加
+                    existing_keys = set(
+                        zip(df_existing['TEST ID'], df_existing['STUDENT ID'], df_existing.get('日時', '').astype(str))
+                    )
+                    new_rows = []
+                    skipped_count = 0
+                    for _, r in df_in.iterrows():
+                        key = (r['TEST ID'], r['STUDENT ID'], str(r['日時']))
+                        if key in existing_keys:
+                            skipped_count += 1
+                        else:
+                            new_rows.append(r)
+                    if new_rows:
+                        df_new_part = pd.DataFrame(new_rows)
+                        df_combined = pd.concat([df_existing, df_new_part], ignore_index=True)
+                    else:
+                        df_combined = df_existing
+                    added_count = len(new_rows)
+            else:
+                df_combined = df_in
+                added_count = len(df_in)
+                skipped_count = 0
+
+            df_combined.to_csv(DATA_FILE, index=False, encoding='utf-8-sig')
+
+        if replace_existing:
+            return True, f"✅ TEST ID [{', '.join(target_tids)}] の成績データを {added_count} 件で入れ替え（復元）しました！"
+        else:
+            msg = f"✅ {added_count} 件の生徒成績データを読み込みました！"
+            if skipped_count > 0:
+                msg += f"（重複していた {skipped_count} 件はスキップしました）"
+            return True, msg
+
+    except Exception as e:
+        return False, f"成績データの読み込みエラー: {e}"
 
 def safe_read_csv(filepath):
     if not os.path.exists(filepath):
@@ -974,8 +1200,38 @@ elif mode == "教員用（正解・配点・大問・特殊ルール設定）":
                 st.session_state[f"pts_{target_test_id}_{q_k}"] = loaded_pts.get(q_k, 2)
 
         st.info(f"現在 **TEST ID: {target_test_id}** の正答・配点を設定・編集しています。")
+
+        with st.container(border=True):
+            st.markdown("**💾 テスト設定（正解・配点・大問・完答ルール）のCSV出力・読み込み**")
+            st.caption("設定をCSVで保存しておけば、プログラム更新（再デプロイ）後もCSVをアップロードするだけで1クリック復元できます。")
+            
+            col_io1, col_io2 = st.columns([1.2, 2])
+            with col_io1:
+                st.write("")
+                settings_csv_bytes = export_test_settings_csv(target_test_id)
+                st.download_button(
+                    label=f"📥 TEST ID [{target_test_id}] の設定をCSV出力",
+                    data=settings_csv_bytes,
+                    file_name=f"test_config_{target_test_id}.csv",
+                    mime="text/csv",
+                    use_container_width=True
+                )
+            with col_io2:
+                uploaded_cfg_csv = st.file_uploader(
+                    f"CSVから TEST ID [{target_test_id}] に設定を読み込む",
+                    type=["csv"],
+                    key=f"cfg_csv_uploader_{target_test_id}"
+                )
+                if uploaded_cfg_csv is not None:
+                    if st.button(f"📤 このCSVから TEST ID [{target_test_id}] に反映する", type="primary", use_container_width=True):
+                        ok, io_msg = import_test_settings_csv(uploaded_cfg_csv, target_test_id)
+                        if ok:
+                            st.success(io_msg)
+                            st.rerun()
+                        else:
+                            st.error(io_msg)
         
-        with st.expander("📷 【AI機能】模範解答画像から黒塗り正答を自動解析（手動修正可）", expanded=True):
+        with st.expander("📷 【AI機能】模範解答画像から黒塗り正答を自動解析（手動修正可）", expanded=False):
             active_api_key = saved_gemini_key or os.environ.get("GEMINI_API_KEY", "")
             if not active_api_key:
                 st.warning("⚠️ Gemini APIキーが未設定です。")
@@ -1088,11 +1344,9 @@ elif mode == "教員用（正解・配点・大問・特殊ルール設定）":
         st.markdown("---")
         st.markdown(f"###### ✍️ 個別配点・正答の入力・手動補正 (問1 〜 問{t_max_q})")
 
-        # ★ 便利ツールボックス（他TEST IDからの配点コピー & 範囲一括設定）
         with st.container(border=True):
             st.markdown("**⚡ 配点入力の時短ツール**")
             
-            # 1. 他の TEST ID から配点をコピー
             copy_candidates = [tid for tid in existing_test_ids if tid != target_test_id]
             if not copy_candidates:
                 copy_candidates = existing_test_ids
@@ -1118,7 +1372,6 @@ elif mode == "教員用（正解・配点・大問・特殊ルール設定）":
 
             st.markdown("---")
 
-            # 2. 問○〜問×をまとめて△点に設定
             col_bk1, col_bk2, col_bk3, col_bk4 = st.columns([1, 1, 1, 1.5])
             with col_bk1:
                 bulk_start = st.number_input("開始問", min_value=1, max_value=t_max_q, value=1, step=1, key=f"bulk_s_{target_test_id}")
@@ -1206,6 +1459,33 @@ elif mode == "教員用（正解・配点・大問・特殊ルール設定）":
 
 elif mode == "教員用（集計・Excel出力）":
     st.header("■ 教員用 集計ダッシュボード")
+
+    # ★ 生徒成績データのインポート（CSV / Excel）枠を常に上部に配置
+    with st.expander("📥 生徒の成績データ（CSV / Excel）をインポート（読み込み・復元）", expanded=False):
+        st.caption("以前この画面から出力したCSVまたはExcelファイルをアップロードすると、生徒の採点データを一括復元・追加できます。")
+        col_imp1, col_imp2 = st.columns([2, 1.5])
+        with col_imp1:
+            uploaded_res_file = st.file_uploader(
+                "成績データファイルを選択（.csv / .xlsx）",
+                type=["csv", "xlsx", "xls"],
+                key="student_results_uploader"
+            )
+        with col_imp2:
+            import_mode = st.radio(
+                "読み込み方法",
+                ["既存データに追加（重複はスキップ）", "同じTEST IDのデータを入れ替え（完全復元）"],
+                key="import_res_mode"
+            )
+        if uploaded_res_file is not None:
+            if st.button("📤 このファイルの生徒成績を読み込む", type="primary", use_container_width=True):
+                is_replace = ("入れ替え" in import_mode)
+                ok, res_msg = import_student_results_file(uploaded_res_file, replace_existing=is_replace)
+                if ok:
+                    st.success(res_msg)
+                    st.rerun()
+                else:
+                    st.error(res_msg)
+
     df = safe_read_csv(DATA_FILE)
     unique_test_ids = get_clean_unique_test_ids(df)
     
@@ -1217,9 +1497,7 @@ elif mode == "教員用（集計・Excel出力）":
         
         selected_test_id = st.selectbox("📌 集計対象の TEST ID を選択してください", unique_test_ids)
         df_display = df[df['TEST ID'] == selected_test_id].copy()
-
-        if 'STUDENT ID' in df_display.columns:
-            df_display = df_display.sort_values(by='STUDENT ID').reset_index(drop=True)
+        df_display['合計点'] = pd.to_numeric(df_display['合計点'], errors='coerce')
 
         st.info(f"現在 **TEST ID: {selected_test_id}** の集計結果を表示しています。")
         st.markdown("---")
@@ -1229,15 +1507,67 @@ elif mode == "教員用（集計・Excel出力）":
 
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("提出枚数", f"{len(df_display)} 枚")
-        df_display['合計点'] = pd.to_numeric(df_display['合計点'], errors='coerce')
         m2.metric("全平均点", f"{round(df_display['合計点'].mean(), 1)} 点" if not df_display.empty else "0 点")
         max_score = int(df_display['合計点'].max()) if not df_display.empty and not pd.isna(df_display['合計点'].max()) else 0
         m3.metric("最高点", f"{max_score} 点 / {ref_total_score} 点")
         m4.metric("最低点", f"{int(df_display['合計点'].min())} 点" if not df_display.empty and not pd.isna(df_display['合計点'].min()) else "0 点")
 
         st.markdown("---")
-        st.subheader("1. 個人別解答・得点一覧 (Student ID 順)")
-        st.caption("💡 テストデータや重複登録されたデータなど、不要な行の左端にある「削除選択」にチェックを入れて「選択した行を削除」を押すとデータを消去できます。")
+        st.subheader("1. 個人別解答・得点一覧")
+
+        sort_option = st.radio(
+            "🔄 並べ替え順序を選択：",
+            ["生徒ID順（昇順）", "入力日時順（新しい順）", "高得点順（降順）", "低得点順（昇順）"],
+            horizontal=True,
+            key=f"sort_opt_{selected_test_id}"
+        )
+
+        if sort_option == "生徒ID順（昇順）" and 'STUDENT ID' in df_display.columns:
+            df_display = df_display.sort_values(by=['STUDENT ID', '日時'], ascending=[True, True]).reset_index(drop=True)
+        elif sort_option == "入力日時順（新しい順）" and '日時' in df_display.columns:
+            df_display = df_display.sort_values(by='日時', ascending=False).reset_index(drop=True)
+        elif sort_option == "高得点順（降順）":
+            df_display = df_display.sort_values(by=['合計点', 'STUDENT ID'], ascending=[False, True]).reset_index(drop=True)
+        elif sort_option == "低得点順（昇順）":
+            df_display = df_display.sort_values(by=['合計点', 'STUDENT ID'], ascending=[True, True]).reset_index(drop=True)
+
+        df_export = df_display.drop(columns=['_orig_idx']).copy()
+        timestamp_str = datetime.now().strftime('%Y%m%d_%H%M')
+        csv_bytes = df_export.to_csv(index=False, encoding='utf-8-sig').encode('utf-8-sig')
+
+        if HAS_OPENPYXL:
+            col_dl1, col_dl2, _ = st.columns([1.5, 1.5, 3])
+            with col_dl1:
+                st.download_button(
+                    label="📄 CSV出力（Excel対応）",
+                    data=csv_bytes,
+                    file_name=f"test_{selected_test_id}_results_{timestamp_str}.csv",
+                    mime="text/csv",
+                    use_container_width=True
+                )
+            with col_dl2:
+                excel_buffer = io.BytesIO()
+                with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
+                    df_export.to_excel(writer, index=False, sheet_name=f"TEST_{selected_test_id}")
+                st.download_button(
+                    label="📊 Excel出力（.xlsx）",
+                    data=excel_buffer.getvalue(),
+                    file_name=f"test_{selected_test_id}_results_{timestamp_str}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True
+                )
+        else:
+            col_dl1, _ = st.columns([1.8, 4.2])
+            with col_dl1:
+                st.download_button(
+                    label="📄 データ出力（CSV / Excel対応）",
+                    data=csv_bytes,
+                    file_name=f"test_{selected_test_id}_results_{timestamp_str}.csv",
+                    mime="text/csv",
+                    use_container_width=True
+                )
+
+        st.caption("💡 テストデータや重複登録されたデータなど、不要な行の左端にある「削除選択」にチェックを入れて「削除する」を押すとデータを消去できます。")
 
         df_edit = df_display.drop(columns=['_orig_idx']).copy()
         df_edit.insert(0, '削除選択', False)
@@ -1247,7 +1577,7 @@ elif mode == "教員用（集計・Excel出力）":
             use_container_width=True,
             hide_index=True,
             disabled=[col for col in df_edit.columns if col != '削除選択'],
-            key=f"editor_{selected_test_id}"
+            key=f"editor_{selected_test_id}_{sort_option}"
         )
 
         selected_rows_mask = edited_df['削除選択'] == True
@@ -1259,4 +1589,4 @@ elif mode == "教員用（集計・Excel出力）":
                 st.success(f"{num_selected} 件のデータを削除しました。")
                 st.rerun()
     else:
-        st.warning("まだ採点データがありません。")
+        st.info("まだ採点データがありません。生徒がマークシートを提出するか、上の「📥 生徒の成績データをインポート」から過去のCSV/Excelファイルを読み込んでください。")
