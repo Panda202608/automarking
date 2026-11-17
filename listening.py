@@ -198,6 +198,15 @@ def save_test_result_to_csv(row_data):
             df_all = df_new
         df_all.to_csv(DATA_FILE, index=False, encoding='utf-8-sig')
 
+def delete_rows_from_csv(orig_indices_to_delete):
+    lock = FileLock(LOCK_FILE, timeout=10)
+    with lock:
+        if os.path.exists(DATA_FILE):
+            df_existing = safe_read_csv(DATA_FILE)
+            if not df_existing.empty:
+                df_remaining = df_existing.drop(index=orig_indices_to_delete, errors='ignore').reset_index(drop=True)
+                df_remaining.to_csv(DATA_FILE, index=False, encoding='utf-8-sig')
+
 # ---------------------------------------------------------
 # 4頂点の自動正規化ソート
 # ---------------------------------------------------------
@@ -812,7 +821,7 @@ if mode == "📱 生徒用（解答・採点・統計）":
                         {"大問": sec['name'], "範囲": sec['range'], "得点": f"{sec['score']} / {sec['max_score']} 点", "得点率": f"{sec['rate']}%"}
                         for sec in section_summary
                     ])
-                    st.dataframe(rate_df, use_container_width=True, height=280)
+                    st.dataframe(rate_df, hide_index=True, height=280)
 
             st.markdown("---")
             st.write("**【設問別 正誤一覧】**")
@@ -843,8 +852,8 @@ if mode == "📱 生徒用（解答・採点・統計）":
                 return [''] * len(row)
 
             res_df = pd.DataFrame(results_list)
-            # height を指定せず、st.dataframe で全体を表示させるよう設定
-            st.dataframe(res_df.style.apply(highlight_rows, axis=1), use_container_width=True, hide_index=True)
+            # use_container_width=True を外して文字数に合わせたコンパクトな横幅にする
+            st.dataframe(res_df.style.apply(highlight_rows, axis=1), hide_index=True)
 
             st.markdown("---")
             if st.button("次の解答を採点する ▶", type="primary", use_container_width=True):
@@ -891,7 +900,8 @@ if mode == "📱 生徒用（解答・採点・統計）":
 
                     stat_table.append({'問題': q, '正解': correct_val, '全体正答率': f"{acc:.1f}%"})
 
-                st.dataframe(pd.DataFrame(stat_table), height=400, use_container_width=True)
+                # use_container_width=True を外して文字数に合わせたコンパクトな横幅にする
+                st.dataframe(pd.DataFrame(stat_table), height=400, hide_index=True)
             else:
                 st.info("選択された TEST ID のデータはまだありません。")
         else:
@@ -1149,6 +1159,8 @@ elif mode == "教員用（集計・Excel出力）":
     unique_test_ids = get_clean_unique_test_ids(df)
     
     if unique_test_ids:
+        # 元のCSVの行番号（削除時に特定するため）を保持
+        df['_orig_idx'] = df.index
         df['TEST ID'] = df['TEST ID'].astype(str).str.strip().str.replace(r'\.0$', '', regex=True).str.zfill(2)
         if 'STUDENT ID' in df.columns:
             df['STUDENT ID'] = df['STUDENT ID'].astype(str).str.strip().str.replace(r'\.0$', '', regex=True).str.zfill(4)
@@ -1175,6 +1187,28 @@ elif mode == "教員用（集計・Excel出力）":
 
         st.markdown("---")
         st.subheader("1. 個人別解答・得点一覧 (Student ID 順)")
-        st.dataframe(df_display, use_container_width=True)
+        st.caption("💡 テストデータや重複登録されたデータなど、不要な行の左端にある「削除選択」にチェックを入れて「選択した行を削除」を押すとデータを消去できます。")
+
+        # 削除用チェックボックス列を先頭に追加
+        df_edit = df_display.drop(columns=['_orig_idx']).copy()
+        df_edit.insert(0, '削除選択', False)
+
+        edited_df = st.data_editor(
+            df_edit,
+            use_container_width=True,
+            hide_index=True,
+            disabled=[col for col in df_edit.columns if col != '削除選択'],
+            key=f"editor_{selected_test_id}"
+        )
+
+        # チェックされた行の元のCSVインデックスを取得
+        selected_rows_mask = edited_df['削除選択'] == True
+        if selected_rows_mask.any():
+            num_selected = int(selected_rows_mask.sum())
+            if st.button(f"🗑️ チェックした {num_selected} 件のデータを削除する", type="primary"):
+                orig_indices_to_remove = df_display.loc[selected_rows_mask, '_orig_idx'].tolist()
+                delete_rows_from_csv(orig_indices_to_remove)
+                st.success(f"{num_selected} 件のデータを削除しました。")
+                st.rerun()
     else:
         st.warning("まだ採点データがありません。")
