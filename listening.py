@@ -28,7 +28,7 @@ DATA_DIR = "/app/data" if os.path.exists("/app/data") else "data"
 os.makedirs(DATA_DIR, exist_ok=True)
 
 DATA_FILE = os.path.join(DATA_DIR, "test_results.csv")
-LOCK_FILE = "/tmp/test_results.csv.lock"  # ロックファイルは高速なローカル(/tmp)に置くのが安全です
+LOCK_FILE = "/tmp/test_results.csv.lock"
 ANSWER_KEY_FILE = os.path.join(DATA_DIR, "answer_keys.json")
 POINTS_KEY_FILE = os.path.join(DATA_DIR, "points_keys.json")
 TEST_CONFIG_FILE = os.path.join(DATA_DIR, "test_configs.json")
@@ -175,6 +175,11 @@ def save_special_rules(test_id, rules_list):
     t_key = str(test_id).zfill(2)
     data[t_key] = rules_list
     save_json_file(RULES_KEY_FILE, data)
+
+def clear_image_session_cache():
+    for k in ["uploaded_image", "debug_main", "img_exam", "img_q1", "img_q2"]:
+        if k in st.session_state:
+            st.session_state[k] = None
 
 # --- テスト設定CSV エクスポート・インポート用関数 ---
 def export_test_settings_csv(test_id):
@@ -326,7 +331,6 @@ def import_student_results_file(uploaded_file, replace_existing=False):
         if df_in.empty:
             return False, "アップロードされたファイルにデータが含まれていません。"
 
-        # 不要な管理用列があれば除去
         drop_cols = [c for c in ['削除選択', '_orig_idx'] if c in df_in.columns]
         if drop_cols:
             df_in = df_in.drop(columns=drop_cols)
@@ -335,7 +339,6 @@ def import_student_results_file(uploaded_file, replace_existing=False):
         if not required_cols.issubset(set(df_in.columns)):
             return False, f"ファイルの列名が一致しません。必須列: {', '.join(required_cols)}"
 
-        # IDの正規化（01, 0101形式に揃える）
         df_in['TEST ID'] = df_in['TEST ID'].astype(str).str.strip().str.replace(r'\.0$', '', regex=True).str.zfill(2)
         df_in['STUDENT ID'] = df_in['STUDENT ID'].astype(str).str.strip().str.replace(r'\.0$', '', regex=True).str.zfill(4)
         if '日時' not in df_in.columns:
@@ -353,13 +356,11 @@ def import_student_results_file(uploaded_file, replace_existing=False):
                 df_existing['STUDENT ID'] = df_existing['STUDENT ID'].astype(str).str.strip().str.replace(r'\.0$', '', regex=True).str.zfill(4)
 
                 if replace_existing:
-                    # インポートファイルに含まれる TEST ID の既存データを削除して入れ替える
                     df_base = df_existing[~df_existing['TEST ID'].isin(target_tids)].copy()
                     df_combined = pd.concat([df_base, df_in], ignore_index=True)
                     added_count = len(df_in)
                     skipped_count = 0
                 else:
-                    # 重複（TEST ID + STUDENT ID + 日時 が完全一致）をスキップして追加
                     existing_keys = set(
                         zip(df_existing['TEST ID'], df_existing['STUDENT ID'], df_existing.get('日時', '').astype(str))
                     )
@@ -498,6 +499,8 @@ def detect_square_markers(gray_img):
     return [(c[0], c[1]) for c in candidates], f"検出数不十分 ({len(candidates)}/12個)"
 
 def auto_orient_and_get_markers(image):
+    last_markers = []
+    last_msg = ""
     for rot in [0, 1, 2, 3]:
         if rot == 0: test_img = image.copy()
         elif rot == 1: test_img = cv2.rotate(image, cv2.ROTATE_90_CLOCKWISE)
@@ -509,15 +512,20 @@ def auto_orient_and_get_markers(image):
 
         gray = cv2.cvtColor(test_img, cv2.COLOR_BGR2GRAY)
         markers, msg = detect_square_markers(gray)
+        last_markers, last_msg = markers, msg
 
         if len(markers) == 12:
             try:
-                g_exam, g_q1, _ = group_12_markers_robust(markers)
-                if abs(g_exam[0][0] - g_exam[2][0]) < 100:
-                    return test_img, markers, f"向き自動検出完了: {msg}"
-            except:
+                g_exam, g_q1, g_q2 = group_12_markers_robust(markers)
+                # 左端ブロック(ID)の幅と右端ブロック(Q26-50)の幅を比較して180度逆さまを防止
+                left_width = abs(g_exam[1][0] - g_exam[0][0])
+                right_width = abs(g_q2[1][0] - g_q2[0][0])
+                
+                if abs(g_exam[0][0] - g_exam[2][0]) < 100 and left_width < right_width:
+                    return test_img, markers, f"向き自動検出完了 (回転:{rot*90}度): {msg}"
+            except Exception:
                 pass
-    return image, markers, f"向き補正不可: {msg}"
+    return image, last_markers, f"向き補正不可: {last_msg}"
 
 # ---------------------------------------------------------
 # メイン解析処理
@@ -787,6 +795,7 @@ if mode == "📱 生徒用（解答・採点・統計）":
             col_top_btn1, col_top_btn2 = st.columns([1, 2])
             with col_top_btn1:
                 if st.button("🔄 再撮影（撮り直す）", type="secondary", use_container_width=True):
+                    clear_image_session_cache()
                     st.session_state.step = 1
                     st.rerun()
 
@@ -844,6 +853,7 @@ if mode == "📱 生徒用（解答・採点・統計）":
             col_bot_btn1, col_bot_btn2 = st.columns([1, 2])
             with col_bot_btn1:
                 if st.button("🔄 再撮影（撮り直す）", key="btn_re_take", use_container_width=True):
+                    clear_image_session_cache()
                     st.session_state.step = 1
                     st.rerun()
             with col_bot_btn2:
@@ -978,6 +988,7 @@ if mode == "📱 生徒用（解答・採点・統計）":
                             })
 
                     save_test_result_to_csv(row_d)
+                    clear_image_session_cache()
 
                     st.session_state.result_total_score = int(t_score)
                     st.session_state.results_list = res_list
@@ -1086,6 +1097,7 @@ if mode == "📱 生徒用（解答・採点・統計）":
 
             st.markdown("---")
             if st.button("次の解答を採点する ▶", type="primary", use_container_width=True):
+                clear_image_session_cache()
                 st.session_state.step = 1
                 st.rerun()
 
@@ -1098,7 +1110,7 @@ if mode == "📱 生徒用（解答・採点・統計）":
             df_all['TEST ID'] = df_all['TEST ID'].astype(str).str.strip().str.replace(r'\.0$', '', regex=True).str.zfill(2)
             selected_stat_tid = st.selectbox("📌 確認したい TEST ID を選択してください", unique_test_ids, key="student_stat_tid")
             
-            df_test = df_all[df_all['TEST ID'] == selected_stat_tid]
+            df_test = df_all[df_all['TEST ID'] == selected_stat_tid].copy()
             
             if not df_test.empty:
                 stat_t_cfg = load_test_config(selected_stat_tid)
@@ -1349,13 +1361,13 @@ elif mode == "教員用（正解・配点・大問・特殊ルール設定）":
         st.markdown(f"###### ✍️ 個別配点・正答の入力・手動補正 (問1 〜 問{t_max_q})")
 
         with st.container(border=True):
-            st.markdown("**⚡ 配点入力の時短ツール**")
+            st.markdown("**⚡ 配点・大問・完答ルールの時短ツール**")
             
             copy_candidates = [tid for tid in existing_test_ids if tid != target_test_id]
             if not copy_candidates:
                 copy_candidates = existing_test_ids
 
-            col_cp1, col_cp2 = st.columns([2, 1.5])
+            col_cp1, col_cp2 = st.columns([1.8, 2.2])
             with col_cp1:
                 src_test_id = st.selectbox(
                     "コピー元の TEST ID を選択",
@@ -1365,13 +1377,32 @@ elif mode == "教員用（正解・配点・大問・特殊ルール設定）":
             with col_cp2:
                 st.write("")
                 st.write("")
-                if st.button("📋 この TEST ID から配点をコピー", key=f"btn_copy_pts_{target_test_id}", use_container_width=True):
-                    src_pts_dict = load_points_key(src_test_id, t_max_q)
-                    for i in range(1, t_max_q + 1):
-                        if i not in special_q_set:
-                            q_k = f'Q{i}'
-                            st.session_state[f"pts_{target_test_id}_{q_k}"] = int(src_pts_dict.get(q_k, 2))
-                    st.success(f"TEST ID [{src_test_id}] の配点をコピーしました！（最後に下の「一括保存」を押してください）")
+                if st.button("📋 この TEST ID から配点・大問・完答ルールをコピー", key=f"btn_copy_pts_{target_test_id}", use_container_width=True):
+                    # 1. 基本設定（問題数・目標満点）のコピーと保存
+                    src_cfg = load_test_config(src_test_id)
+                    copied_max_q = int(src_cfg.get("max_questions", t_max_q))
+                    copied_total_sc = int(src_cfg.get("total_score", t_total_score))
+                    save_test_config(target_test_id, copied_max_q, copied_total_sc)
+
+                    # 2. 大問の区切り（セクション）のコピーと保存
+                    src_sections = load_sections_config(src_test_id)
+                    save_sections_config(target_test_id, src_sections)
+
+                    # 3. 特殊配点（完答ルール）のコピーと保存
+                    src_rules = load_special_rules(src_test_id)
+                    save_special_rules(target_test_id, src_rules)
+
+                    # 4. 個別配点のコピー（セッション＆保存）
+                    src_pts_dict = load_points_key(src_test_id, copied_max_q)
+                    copied_pts_to_save = {}
+                    for i in range(1, copied_max_q + 1):
+                        q_k = f'Q{i}'
+                        pt_val = int(src_pts_dict.get(q_k, 2))
+                        st.session_state[f"pts_{target_test_id}_{q_k}"] = pt_val
+                        copied_pts_to_save[q_k] = pt_val
+                    save_points_key(target_test_id, copied_pts_to_save)
+
+                    st.success(f"TEST ID [{src_test_id}] から配点・基本設定・大問区切り・完答ルールをコピーしました！")
                     st.rerun()
 
             st.markdown("---")
@@ -1464,7 +1495,6 @@ elif mode == "教員用（正解・配点・大問・特殊ルール設定）":
 elif mode == "教員用（集計・Excel出力）":
     st.header("■ 教員用 集計ダッシュボード")
 
-    # ★ 生徒成績データのインポート（CSV / Excel）枠を常に上部に配置
     with st.expander("📥 生徒の成績データ（CSV / Excel）をインポート（読み込み・復元）", expanded=False):
         st.caption("以前この画面から出力したCSVまたはExcelファイルをアップロードすると、生徒の採点データを一括復元・追加できます。")
         col_imp1, col_imp2 = st.columns([2, 1.5])
@@ -1516,8 +1546,58 @@ elif mode == "教員用（集計・Excel出力）":
         m3.metric("最高点", f"{max_score} 点 / {ref_total_score} 点")
         m4.metric("最低点", f"{int(df_display['合計点'].min())} 点" if not df_display.empty and not pd.isna(df_display['合計点'].min()) else "0 点")
 
+        # ---------------------------------------------------------
+        # クラス別平均点セクション（STUDENT ID 左2桁 31〜36）
+        # ---------------------------------------------------------
         st.markdown("---")
-        st.subheader("1. 個人別解答・得点一覧")
+        st.subheader("1. クラス別平均点（STUDENT ID 左2桁: 31〜36）")
+        if 'STUDENT ID' in df_display.columns and not df_display.empty:
+            df_cls = df_display.copy()
+            df_cls['クラスコード'] = df_cls['STUDENT ID'].astype(str).str[:2]
+            target_classes = ["31", "32", "33", "34", "35", "36"]
+            
+            class_rows = []
+            for c_code in target_classes:
+                sub_df = df_cls[df_cls['クラスコード'] == c_code]
+                cnt = len(sub_df)
+                if cnt > 0:
+                    avg_sc = round(sub_df['合計点'].mean(), 1)
+                    max_sc = int(sub_df['合計点'].max()) if not pd.isna(sub_df['合計点'].max()) else 0
+                    min_sc = int(sub_df['合計点'].min()) if not pd.isna(sub_df['合計点'].min()) else 0
+                    class_rows.append({
+                        "クラス": f"{c_code}組",
+                        "提出人数": f"{cnt} 人",
+                        "平均点": f"{avg_sc} 点",
+                        "最高点": f"{max_sc} 点",
+                        "最低点": f"{min_sc} 点"
+                    })
+                else:
+                    class_rows.append({
+                        "クラス": f"{c_code}組",
+                        "提出人数": "0 人",
+                        "平均点": "-",
+                        "最高点": "-",
+                        "最低点": "-"
+                    })
+
+            # 31〜36以外のIDが含まれている場合の補助行
+            other_df = df_cls[~df_cls['クラスコード'].isin(target_classes)]
+            if len(other_df) > 0:
+                class_rows.append({
+                    "クラス": "その他 (31〜36以外)",
+                    "提出人数": f"{len(other_df)} 人",
+                    "平均点": f"{round(other_df['合計点'].mean(), 1)} 点",
+                    "最高点": f"{int(other_df['合計点'].max())} 点",
+                    "最低点": f"{int(other_df['合計点'].min())} 点"
+                })
+
+            st.dataframe(pd.DataFrame(class_rows), use_container_width=True, hide_index=True)
+
+        # ---------------------------------------------------------
+        # 個人別解答・得点一覧（STUDENT ID の隣に 合計点 を配置）
+        # ---------------------------------------------------------
+        st.markdown("---")
+        st.subheader("2. 個人別解答・得点一覧")
 
         sort_option = st.radio(
             "🔄 並べ替え順序を選択：",
@@ -1535,7 +1615,12 @@ elif mode == "教員用（集計・Excel出力）":
         elif sort_option == "低得点順（昇順）":
             df_display = df_display.sort_values(by=['合計点', 'STUDENT ID'], ascending=[True, True]).reset_index(drop=True)
 
+        # 列の並び順整理：STUDENT ID のすぐ右隣に 合計点 を配置
         df_export = df_display.drop(columns=['_orig_idx']).copy()
+        front_cols = [c for c in ['日時', 'TEST ID', 'STUDENT ID', '合計点'] if c in df_export.columns]
+        other_cols = [c for c in df_export.columns if c not in front_cols]
+        df_export = df_export[front_cols + other_cols]
+
         timestamp_str = datetime.now().strftime('%Y%m%d_%H%M')
         csv_bytes = df_export.to_csv(index=False, encoding='utf-8-sig').encode('utf-8-sig')
 
@@ -1573,7 +1658,7 @@ elif mode == "教員用（集計・Excel出力）":
 
         st.caption("💡 テストデータや重複登録されたデータなど、不要な行の左端にある「削除選択」にチェックを入れて「削除する」を押すとデータを消去できます。")
 
-        df_edit = df_display.drop(columns=['_orig_idx']).copy()
+        df_edit = df_export.copy()
         df_edit.insert(0, '削除選択', False)
 
         edited_df = st.data_editor(
