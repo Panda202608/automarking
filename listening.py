@@ -23,16 +23,20 @@ except ImportError:
     HAS_OPENPYXL = False
 
 # --- データ保存用ファイルパス ---
-DATA_FILE = "test_results.csv"
-LOCK_FILE = "test_results.csv.lock"
-ANSWER_KEY_FILE = "answer_keys.json"
-POINTS_KEY_FILE = "points_keys.json"
-TEST_CONFIG_FILE = "test_configs.json"
-RULES_KEY_FILE = "special_rules.json"
-SECTIONS_KEY_FILE = "sections_keys.json"
-CONFIG_FILE = "config.json"
-PASSWORD_FILE = "password.json"
-GEMINI_KEY_FILE = "gemini_key.json"
+# Cloud Runでマウントした /app/data が存在すればそこを使い、ローカル実行時は ./data を使う
+DATA_DIR = "/app/data" if os.path.exists("/app/data") else "data"
+os.makedirs(DATA_DIR, exist_ok=True)
+
+DATA_FILE = os.path.join(DATA_DIR, "test_results.csv")
+LOCK_FILE = "/tmp/test_results.csv.lock"  # ロックファイルは高速なローカル(/tmp)に置くのが安全です
+ANSWER_KEY_FILE = os.path.join(DATA_DIR, "answer_keys.json")
+POINTS_KEY_FILE = os.path.join(DATA_DIR, "points_keys.json")
+TEST_CONFIG_FILE = os.path.join(DATA_DIR, "test_configs.json")
+RULES_KEY_FILE = os.path.join(DATA_DIR, "special_rules.json")
+SECTIONS_KEY_FILE = os.path.join(DATA_DIR, "sections_keys.json")
+CONFIG_FILE = os.path.join(DATA_DIR, "config.json")
+PASSWORD_FILE = os.path.join(DATA_DIR, "password.json")
+GEMINI_KEY_FILE = os.path.join(DATA_DIR, "gemini_key.json")
 
 st.set_page_config(page_title="共通テスト採点・集計システム", layout="wide")
 
