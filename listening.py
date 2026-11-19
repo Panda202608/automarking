@@ -439,7 +439,7 @@ def delete_rows_from_csv(orig_indices_to_delete):
                 df_remaining.to_csv(DATA_FILE, index=False, encoding='utf-8-sig')
 
 # ---------------------------------------------------------
-# 4頂点の自動正規化ソート
+# 4頂点の自動正規化ソート・四角マーカー検出（強化版）
 # ---------------------------------------------------------
 def order_points(pts):
     pts = np.array(pts, dtype="float32")
@@ -466,37 +466,90 @@ def group_12_markers_robust(markers):
     
     return group_exam, group_q1, group_q2
 
+def find_12_paired_markers(candidates, norm_w, norm_h):
+    """候補の中から、上下に同じX座標でペアになっている6組（計12個）の四角マーカーを抽出する"""
+    if len(candidates) < 12:
+        return None
+
+    # 上端領域(y < norm_h * 0.35) と 下端領域(y > norm_h * 0.65) に分離（途中のマーク欄を完全除外）
+    top_cands = [c for c in candidates if c[1] < norm_h * 0.35]
+    bot_cands = [c for c in candidates if c[1] > norm_h * 0.65]
+
+    if len(top_cands) < 6 or len(bot_cands) < 6:
+        return None
+
+    pairs = []
+    used_bot = set()
+    for t in sorted(top_cands, key=lambda x: x[0]):
+        best_b = None
+        best_dx = 9999
+        for idx, b in enumerate(bot_cands):
+            if idx in used_bot:
+                continue
+            dx = abs(t[0] - b[0])
+            dy = b[1] - t[1]
+            # 上下マーカーのXズレが画面幅の3%以内、Y距離が画面高さの55%〜95%の間
+            if dx < (norm_w * 0.03) and (norm_h * 0.55) < dy < (norm_h * 0.95):
+                if dx < best_dx:
+                    best_dx = dx
+                    best_b = (idx, b)
+        if best_b is not None:
+            used_bot.add(best_b[0])
+            pairs.append((t, best_b[1]))
+
+    if len(pairs) >= 6:
+        pairs.sort(key=lambda p: abs(p[0][0] - p[1][0]))
+        selected_6 = pairs[:6]
+        result_12 = []
+        for t, b in selected_6:
+            result_12.append((t[0], t[1]))
+            result_12.append((b[0], b[1]))
+        return result_12
+    return None
+
 def detect_square_markers(gray_img):
     norm_h, norm_w = gray_img.shape
     blurred = cv2.GaussianBlur(gray_img, (5, 5), 0)
     
     thresh_methods = [
+        cv2.adaptiveThreshold(blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 51, 10),
         cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1],
-        cv2.adaptiveThreshold(blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 31, 5),
-        cv2.threshold(blurred, 90, 255, cv2.THRESH_BINARY_INV)[1],
+        cv2.threshold(blurred, 110, 255, cv2.THRESH_BINARY_INV)[1],
+        cv2.threshold(blurred, 85, 255, cv2.THRESH_BINARY_INV)[1],
     ]
 
+    best_candidates = []
+
     for thresh in thresh_methods:
-        contours, _ = cv2.findContours(thresh, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+        contours, _ = cv2.findContours(thresh, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
         candidates = []
         for c in contours:
             x, y, bw, bh = cv2.boundingRect(c)
-            aspect = float(bw) / bh
+            aspect = float(bw) / bh if bh > 0 else 0
             area = cv2.contourArea(c)
-            solidity = area / float(bw * bh) if (bw * bh) > 0 else 0
+            rect_area = float(bw * bh)
+            solidity = area / rect_area if rect_area > 0 else 0
 
-            if 0.65 < aspect < 1.5 and (norm_w * 0.005) < bw < (norm_w * 0.05) and solidity > 0.65:
-                cx, cy = x + bw/2.0, y + bh/2.0
-                if not any(abs(cx - mx) < 25 and abs(cy - my) < 25 for mx, my, _ in candidates):
-                    score = solidity - abs(1.0 - aspect) * 0.2
-                    candidates.append((cx, cy, score))
+            # 四角マーカーのサイズと正方形らしさ（鉛筆マークより一回り大きく四角い）
+            if 0.70 < aspect < 1.40 and (norm_w * 0.008) < bw < (norm_w * 0.045) and (norm_h * 0.010) < bh < (norm_h * 0.060):
+                if solidity > 0.72:
+                    # 輪郭の頂点数チェック（丸・楕円を除外し、四角形に絞る）
+                    peri = cv2.arcLength(c, True)
+                    approx = cv2.approxPolyDP(c, 0.04 * peri, True)
+                    if 4 <= len(approx) <= 6:
+                        cx, cy = x + bw / 2.0, y + bh / 2.0
+                        if not any(abs(cx - mx) < 30 and abs(cy - my) < 30 for mx, my, _ in candidates):
+                            score = solidity - abs(1.0 - aspect) * 0.2
+                            candidates.append((cx, cy, score))
 
-        if len(candidates) >= 12:
-            candidates.sort(key=lambda item: item[2], reverse=True)
-            top_12 = [(c[0], c[1]) for c in candidates[:12]]
-            return top_12, f"マーカー12個検出成功"
+        if len(candidates) > len(best_candidates):
+            best_candidates = candidates
 
-    return [(c[0], c[1]) for c in candidates], f"検出数不十分 ({len(candidates)}/12個)"
+        paired_12 = find_12_paired_markers(candidates, norm_w, norm_h)
+        if paired_12 is not None:
+            return paired_12, "マーカー12個検出成功（上下ペア一致）"
+
+    return [(c[0], c[1]) for c in best_candidates], f"検出数不十分 ({len(best_candidates)}/12個)"
 
 def auto_orient_and_get_markers(image):
     last_markers = []
@@ -517,11 +570,10 @@ def auto_orient_and_get_markers(image):
         if len(markers) == 12:
             try:
                 g_exam, g_q1, g_q2 = group_12_markers_robust(markers)
-                # 左端ブロック(ID)の幅と右端ブロック(Q26-50)の幅を比較して180度逆さまを防止
                 left_width = abs(g_exam[1][0] - g_exam[0][0])
                 right_width = abs(g_q2[1][0] - g_q2[0][0])
                 
-                if abs(g_exam[0][0] - g_exam[2][0]) < 100 and left_width < right_width:
+                if abs(g_exam[0][0] - g_exam[2][0]) < 120 and left_width < right_width:
                     return test_img, markers, f"向き自動検出完了 (回転:{rot*90}度): {msg}"
             except Exception:
                 pass
