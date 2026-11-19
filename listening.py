@@ -141,6 +141,29 @@ def save_sections_config(test_id, sections_list):
     data[t_key] = sections_list
     save_json_file(SECTIONS_KEY_FILE, data)
 
+def sync_sections_to_session(test_id, sections_list, max_q):
+    """大問区切りの設定値をセッションステートに同期し、画面上の入力欄へ即座に反映させる"""
+    t_key = str(test_id).zfill(2)
+    sec_count = max(len(sections_list), 1)
+    st.session_state[f"num_sec_{t_key}"] = sec_count
+
+    for idx in range(10):
+        k_name = f"sec_name_{t_key}_{idx}"
+        k_start = f"sec_start_{t_key}_{idx}"
+        k_end = f"sec_end_{t_key}_{idx}"
+        if idx < len(sections_list):
+            sec = sections_list[idx]
+            st.session_state[k_name] = str(sec.get("name", f"第{idx+1}問"))
+            st.session_state[k_start] = max(1, min(int(sec.get("start", 1)), int(max_q)))
+            st.session_state[k_end] = max(1, min(int(sec.get("end", min(5, max_q))), int(max_q)))
+        else:
+            if k_name in st.session_state:
+                del st.session_state[k_name]
+            if k_start in st.session_state:
+                del st.session_state[k_start]
+            if k_end in st.session_state:
+                del st.session_state[k_end]
+
 def load_answer_key(test_id, max_q):
     data = load_json_file(ANSWER_KEY_FILE, {})
     t_key = str(test_id).zfill(2)
@@ -327,6 +350,10 @@ def import_test_settings_csv(uploaded_csv, target_test_id):
         save_answer_key(target_test_id, new_ans)
         save_points_key(target_test_id, new_pts)
 
+        sync_sections_to_session(target_test_id, new_sections, max_q)
+        st.session_state[f"cfg_max_q_{target_test_id}"] = max_q
+        st.session_state[f"cfg_total_sc_{target_test_id}"] = total_sc
+
         for i in range(1, 51):
             q_k = f"Q{i}"
             st.session_state[f"ans_{target_test_id}_{q_k}"] = new_ans.get(q_k, 1)
@@ -495,7 +522,7 @@ def reset_all_academic_year_data():
     for filepath in [ANSWER_KEY_FILE, POINTS_KEY_FILE, TEST_CONFIG_FILE, RULES_KEY_FILE, SECTIONS_KEY_FILE]:
         if os.path.exists(filepath):
             os.remove(filepath)
-    keys_to_clear = [k for k in st.session_state.keys() if k.startswith(("ans_", "pts_", "sec_", "prev_target_test_id"))]
+    keys_to_clear = [k for k in st.session_state.keys() if k.startswith(("ans_", "pts_", "sec_", "num_sec_", "cfg_", "prev_target_test_id"))]
     for k in keys_to_clear:
         del st.session_state[k]
 
@@ -1355,6 +1382,10 @@ elif mode == "教員用（正解・配点・大問・特殊ルール設定）":
             st.session_state.prev_target_test_id = target_test_id
             loaded_ans = load_answer_key(target_test_id, t_max_q)
             loaded_pts = load_points_key(target_test_id, t_max_q)
+            loaded_secs = load_sections_config(target_test_id)
+            sync_sections_to_session(target_test_id, loaded_secs, t_max_q)
+            st.session_state[f"cfg_max_q_{target_test_id}"] = t_max_q
+            st.session_state[f"cfg_total_sc_{target_test_id}"] = t_total_score
             for i in range(1, 51):
                 q_k = f'Q{i}'
                 st.session_state[f"ans_{target_test_id}_{q_k}"] = loaded_ans.get(q_k, 1)
@@ -1406,9 +1437,16 @@ elif mode == "教員用（正解・配点・大問・特殊ルール設定）":
                     with st.spinner("Gemini AIが黒塗り正答マスと配点を解析中..."):
                         ext_data, msg = analyze_master_answer_sheet_ai(master_img_file, active_api_key)
                         if ext_data:
-                            save_test_config(target_test_id, ext_data.get("max_questions", 37), ext_data.get("total_score", 100))
-                            if "sections" in ext_data: save_sections_config(target_test_id, ext_data["sections"])
-                            if "special_rules" in ext_data: save_special_rules(target_test_id, ext_data["special_rules"])
+                            ext_max_q = int(ext_data.get("max_questions", 37))
+                            ext_total_sc = int(ext_data.get("total_score", 100))
+                            save_test_config(target_test_id, ext_max_q, ext_total_sc)
+                            st.session_state[f"cfg_max_q_{target_test_id}"] = ext_max_q
+                            st.session_state[f"cfg_total_sc_{target_test_id}"] = ext_total_sc
+                            if "sections" in ext_data:
+                                save_sections_config(target_test_id, ext_data["sections"])
+                                sync_sections_to_session(target_test_id, ext_data["sections"], ext_max_q)
+                            if "special_rules" in ext_data:
+                                save_special_rules(target_test_id, ext_data["special_rules"])
 
                             save_answer_key(target_test_id, ext_data.get("answers", {}))
                             save_points_key(target_test_id, ext_data.get("points", {}))
@@ -1427,8 +1465,8 @@ elif mode == "教員用（正解・配点・大問・特殊ルール設定）":
 
         st.markdown("##### ⚙️ 1. テスト基本設定（問題数・合計点）")
         col_cfg1, col_cfg2, col_cfg3 = st.columns([2, 2, 1])
-        new_max_q_val = col_cfg1.number_input("問題数 (1〜50)", min_value=1, max_value=50, value=t_max_q, step=1)
-        new_total_score_val = col_cfg2.number_input("合計点 (目標満点)", min_value=1, max_value=500, value=t_total_score, step=1)
+        new_max_q_val = col_cfg1.number_input("問題数 (1〜50)", min_value=1, max_value=50, value=t_max_q, step=1, key=f"cfg_max_q_{target_test_id}")
+        new_total_score_val = col_cfg2.number_input("合計点 (目標満点)", min_value=1, max_value=500, value=t_total_score, step=1, key=f"cfg_total_sc_{target_test_id}")
         
         if col_cfg3.button("基本設定を保存"):
             save_test_config(target_test_id, new_max_q_val, new_total_score_val)
@@ -1440,22 +1478,48 @@ elif mode == "教員用（正解・配点・大問・特殊ルール設定）":
         existing_sections = load_sections_config(target_test_id)
         
         col_sec_num, col_sec_btn = st.columns([2, 1])
-        num_sections = col_sec_num.number_input("大問の数", min_value=1, max_value=10, value=max(len(existing_sections), 1), step=1, key="num_sec_input")
+        num_sections = col_sec_num.number_input(
+            "大問の数",
+            min_value=1,
+            max_value=10,
+            value=max(len(existing_sections), 1),
+            step=1,
+            key=f"num_sec_{target_test_id}"
+        )
         
         new_sections_list = []
         for sec_idx in range(int(num_sections)):
             default_sec = existing_sections[sec_idx] if sec_idx < len(existing_sections) else {}
             c_name, c_s, c_e = st.columns([2, 1.5, 1.5])
-            s_name = c_name.text_input(f"大問{sec_idx+1} 名称", value=default_sec.get("name", f"第{sec_idx+1}問"), key=f"sec_name_{target_test_id}_{sec_idx}")
+            s_name = c_name.text_input(
+                f"大問{sec_idx+1} 名称",
+                value=default_sec.get("name", f"第{sec_idx+1}問"),
+                key=f"sec_name_{target_test_id}_{sec_idx}"
+            )
             def_start = min(int(default_sec.get("start", 1)), t_max_q)
             def_end = min(int(default_sec.get("end", min(5, t_max_q))), t_max_q)
             
-            s_start = c_s.number_input(f"開始問", min_value=1, max_value=t_max_q, value=max(1, def_start), step=1, key=f"sec_start_{target_test_id}_{sec_idx}")
-            s_end = c_e.number_input(f"終了問", min_value=1, max_value=t_max_q, value=max(1, def_end), step=1, key=f"sec_end_{target_test_id}_{sec_idx}")
+            s_start = c_s.number_input(
+                f"開始問",
+                min_value=1,
+                max_value=t_max_q,
+                value=max(1, def_start),
+                step=1,
+                key=f"sec_start_{target_test_id}_{sec_idx}"
+            )
+            s_end = c_e.number_input(
+                f"終了問",
+                min_value=1,
+                max_value=t_max_q,
+                value=max(1, def_end),
+                step=1,
+                key=f"sec_end_{target_test_id}_{sec_idx}"
+            )
             new_sections_list.append({"name": s_name, "start": int(s_start), "end": int(s_end)})
 
         if st.button("大問区切り設定を保存", type="secondary"):
             save_sections_config(target_test_id, new_sections_list)
+            sync_sections_to_session(target_test_id, new_sections_list, t_max_q)
             st.success("大問設定を保存しました！")
             st.rerun()
 
@@ -1528,14 +1592,18 @@ elif mode == "教員用（正解・配点・大問・特殊ルール設定）":
                     copied_max_q = int(src_cfg.get("max_questions", t_max_q))
                     copied_total_sc = int(src_cfg.get("total_score", t_total_score))
                     save_test_config(target_test_id, copied_max_q, copied_total_sc)
+                    st.session_state[f"cfg_max_q_{target_test_id}"] = copied_max_q
+                    st.session_state[f"cfg_total_sc_{target_test_id}"] = copied_total_sc
 
-                    # 2. 大問の区切り（セクション）のコピーと保存
+                    # 2. 大問の区切り（セクション）のコピーと保存（セッションにも即時同期）
                     src_sections = load_sections_config(src_test_id)
-                    save_sections_config(target_test_id, src_sections)
+                    copied_sections = [dict(s) for s in src_sections]
+                    save_sections_config(target_test_id, copied_sections)
+                    sync_sections_to_session(target_test_id, copied_sections, copied_max_q)
 
                     # 3. 特殊配点（完答ルール）のコピーと保存
                     src_rules = load_special_rules(src_test_id)
-                    save_special_rules(target_test_id, src_rules)
+                    save_special_rules(target_test_id, [dict(r) for r in src_rules])
 
                     # 4. 個別配点のコピー（セッション＆保存）
                     src_pts_dict = load_points_key(src_test_id, copied_max_q)
@@ -1633,6 +1701,7 @@ elif mode == "教員用（正解・配点・大問・特殊ルール設定）":
                 save_points_key(target_test_id, new_points)
                 save_test_config(target_test_id, t_max_q, t_total_score)
                 save_sections_config(target_test_id, new_sections_list)
+                sync_sections_to_session(target_test_id, new_sections_list, t_max_q)
                 save_special_rules(target_test_id, current_rules)
                 st.success(f"設定を正常に保存しました！")
                 st.rerun()
