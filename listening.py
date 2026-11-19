@@ -7,8 +7,14 @@ import cv2
 import numpy as np
 from PIL import Image, ImageOps
 from datetime import datetime
+from zoneinfo import ZoneInfo
 import plotly.graph_objects as go
 from filelock import FileLock
+
+JST = ZoneInfo("Asia/Tokyo")
+
+def get_jst_now_str(fmt='%Y-%m-%d %H:%M:%S'):
+    return datetime.now(JST).strftime(fmt)
 
 try:
     import google.generativeai as genai
@@ -391,10 +397,11 @@ def import_student_results_file(uploaded_file, replace_existing=False):
 
         df_in['TEST ID'] = df_in['TEST ID'].astype(str).str.strip().str.replace(r'\.0$', '', regex=True).str.zfill(2)
         df_in['STUDENT ID'] = df_in['STUDENT ID'].astype(str).str.strip().str.replace(r'\.0$', '', regex=True).str.zfill(4)
+        now_jst_str = get_jst_now_str()
         if '日時' not in df_in.columns:
-            df_in.insert(0, '日時', datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+            df_in.insert(0, '日時', now_jst_str)
         else:
-            df_in['日時'] = df_in['日時'].fillna(datetime.now().strftime('%Y-%m-%d %H:%M:%S')).astype(str)
+            df_in['日時'] = df_in['日時'].fillna(now_jst_str).astype(str)
 
         target_tids = df_in['TEST ID'].unique().tolist()
 
@@ -1064,7 +1071,7 @@ if mode == "📱 生徒用（解答・採点・統計）":
                     res_list = []
                     question_scores = {}
                     row_d = {
-                        '日時': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                        '日時': get_jst_now_str(),
                         'TEST ID': t_id,
                         'STUDENT ID': s_id
                     }
@@ -1833,7 +1840,7 @@ elif mode == "教員用（集計・Excel出力）":
         other_cols = [c for c in df_export.columns if c not in front_cols]
         df_export = df_export[front_cols + other_cols]
 
-        timestamp_str = datetime.now().strftime('%Y%m%d_%H%M')
+        timestamp_str = get_jst_now_str('%Y%m%d_%H%M')
         csv_bytes = df_export.to_csv(index=False, encoding='utf-8-sig').encode('utf-8-sig')
 
         if HAS_OPENPYXL:
