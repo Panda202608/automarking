@@ -176,6 +176,29 @@ def save_special_rules(test_id, rules_list):
     data[t_key] = rules_list
     save_json_file(RULES_KEY_FILE, data)
 
+def is_test_id_registered(test_id):
+    """正答データが1問以上登録されているTEST IDかどうかを判定する"""
+    t_key = str(test_id).strip().zfill(2)
+    ans_all = load_json_file(ANSWER_KEY_FILE, {})
+    ans_entry = ans_all.get(t_key, {})
+    return isinstance(ans_entry, dict) and len(ans_entry) > 0
+
+def get_registered_test_ids():
+    """正答が登録済みのTEST ID一覧を昇順で返す"""
+    ans_all = load_json_file(ANSWER_KEY_FILE, {})
+    return sorted([k for k, v in ans_all.items() if isinstance(v, dict) and len(v) > 0])
+
+def check_duplicate_submission(test_id, student_id):
+    """同じTEST IDかつ同じSTUDENT IDの結果が既に保存されているか確認する"""
+    df_existing = safe_read_csv(DATA_FILE)
+    if df_existing.empty or 'TEST ID' not in df_existing.columns or 'STUDENT ID' not in df_existing.columns:
+        return False
+    t_norm = str(test_id).strip().zfill(2)
+    s_norm = str(student_id).strip().zfill(4)
+    t_col = df_existing['TEST ID'].astype(str).str.strip().str.replace(r'\.0$', '', regex=True).str.zfill(2)
+    s_col = df_existing['STUDENT ID'].astype(str).str.strip().str.replace(r'\.0$', '', regex=True).str.zfill(4)
+    return bool(((t_col == t_norm) & (s_col == s_norm)).any())
+
 def clear_image_session_cache():
     for k in ["uploaded_image", "debug_main", "img_exam", "img_q1", "img_q2"]:
         if k in st.session_state:
@@ -414,7 +437,7 @@ def get_clean_unique_test_ids(df):
     clean_series = clean_series[clean_series != 'NAN']
     return sorted(list(clean_series.unique()))
 
-def save_test_result_to_csv(row_data):
+def save_test_result_to_csv(row_data, overwrite=False):
     df_new = pd.DataFrame([row_data])
     lock = FileLock(LOCK_FILE, timeout=10)
     
@@ -422,6 +445,12 @@ def save_test_result_to_csv(row_data):
         if os.path.exists(DATA_FILE):
             df_existing = safe_read_csv(DATA_FILE)
             if not df_existing.empty:
+                if overwrite and 'TEST ID' in df_existing.columns and 'STUDENT ID' in df_existing.columns:
+                    t_norm = str(row_data.get('TEST ID', '')).strip().zfill(2)
+                    s_norm = str(row_data.get('STUDENT ID', '')).strip().zfill(4)
+                    t_col = df_existing['TEST ID'].astype(str).str.strip().str.replace(r'\.0$', '', regex=True).str.zfill(2)
+                    s_col = df_existing['STUDENT ID'].astype(str).str.strip().str.replace(r'\.0$', '', regex=True).str.zfill(4)
+                    df_existing = df_existing[~((t_col == t_norm) & (s_col == s_norm))].copy()
                 df_all = pd.concat([df_existing, df_new], ignore_index=True)
             else:
                 df_all = df_new
@@ -437,6 +466,38 @@ def delete_rows_from_csv(orig_indices_to_delete):
             if not df_existing.empty:
                 df_remaining = df_existing.drop(index=orig_indices_to_delete, errors='ignore').reset_index(drop=True)
                 df_remaining.to_csv(DATA_FILE, index=False, encoding='utf-8-sig')
+
+def delete_all_results_by_test_id(target_test_id):
+    """指定されたTEST IDの生徒採点結果をすべて削除し、削除件数を返す"""
+    t_norm = str(target_test_id).strip().zfill(2)
+    deleted_count = 0
+    lock = FileLock(LOCK_FILE, timeout=10)
+    with lock:
+        if os.path.exists(DATA_FILE):
+            df_existing = safe_read_csv(DATA_FILE)
+            if not df_existing.empty and 'TEST ID' in df_existing.columns:
+                t_col = df_existing['TEST ID'].astype(str).str.strip().str.replace(r'\.0$', '', regex=True).str.zfill(2)
+                mask = (t_col == t_norm)
+                deleted_count = int(mask.sum())
+                df_remaining = df_existing[~mask].reset_index(drop=True)
+                if df_remaining.empty:
+                    os.remove(DATA_FILE)
+                else:
+                    df_remaining.to_csv(DATA_FILE, index=False, encoding='utf-8-sig')
+    return deleted_count
+
+def reset_all_academic_year_data():
+    """新年度用：全テスト設定（正答・配点・大問・完答ルール・基本設定）と全生徒採点結果を一括削除する"""
+    lock = FileLock(LOCK_FILE, timeout=10)
+    with lock:
+        if os.path.exists(DATA_FILE):
+            os.remove(DATA_FILE)
+    for filepath in [ANSWER_KEY_FILE, POINTS_KEY_FILE, TEST_CONFIG_FILE, RULES_KEY_FILE, SECTIONS_KEY_FILE]:
+        if os.path.exists(filepath):
+            os.remove(filepath)
+    keys_to_clear = [k for k in st.session_state.keys() if k.startswith(("ans_", "pts_", "sec_", "prev_target_test_id"))]
+    for k in keys_to_clear:
+        del st.session_state[k]
 
 # ---------------------------------------------------------
 # 4頂点の自動正規化ソート（元の安定ロジック）
@@ -818,9 +879,46 @@ if mode == "📱 生徒用（解答・採点・統計）":
             with c_id1:
                 test_id_val = st.text_input("TEST ID (2桁)", value=raw_test_id)
             with c_id2:
-                student_id_val = st.text_input("STUDENT ID (年・組・番・号)", value=raw_student_id)
+                student_id_val = st.text_input("STUDENT ID (年・組・番・号: 3101〜3645)", value=raw_student_id)
 
-            t_cfg = load_test_config(test_id_val)
+            # ---------------------------------------------------------
+            # バリデーション（TEST ID 登録確認 & STUDENT ID 範囲確認）
+            # ---------------------------------------------------------
+            clean_tid = str(test_id_val).strip()
+            norm_tid = clean_tid.zfill(2) if clean_tid.isdigit() else clean_tid
+            clean_sid = str(student_id_val).strip()
+            norm_sid = clean_sid.zfill(4) if clean_sid.isdigit() else clean_sid
+
+            validation_errors = []
+
+            # 1. TEST ID チェック（解答が登録されているか）
+            registered_tids = get_registered_test_ids()
+            if not clean_tid.isdigit() or len(clean_tid) > 2:
+                validation_errors.append(
+                    f"❌ **TEST ID エラー**: 「{test_id_val}」は正しくありません。2桁の半角数字（例: 01）に手で修正してください。"
+                )
+            elif not is_test_id_registered(norm_tid):
+                hint_str = f"（現在登録済みの TEST ID: {', '.join(registered_tids)}）" if registered_tids else "（現在登録済みの TEST ID はありません）"
+                validation_errors.append(
+                    f"❌ **未登録の TEST ID**: TEST ID「**{norm_tid}**」には解答が登録されていません。上の「TEST ID (2桁)」欄を手で正しい番号に修正してください。{hint_str}"
+                )
+
+            # 2. STUDENT ID チェック（3101〜3645 の範囲内か）
+            if not clean_sid.isdigit() or len(clean_sid) != 4:
+                validation_errors.append(
+                    f"❌ **STUDENT ID エラー**: 「{student_id_val}」は4桁の半角数字ではありません。**3101〜3645** の範囲で手で修正してください。"
+                )
+            else:
+                sid_num = int(clean_sid)
+                if sid_num < 3101 or sid_num > 3645:
+                    validation_errors.append(
+                        f"❌ **STUDENT ID 範囲外エラー**: 「**{clean_sid}**」は有効範囲（**3101〜3645**）を逸脱しています。上の「STUDENT ID」欄を手で正しい出席番号に修正してください。"
+                    )
+
+            for err_msg in validation_errors:
+                st.error(err_msg)
+
+            t_cfg = load_test_config(norm_tid)
             current_test_max_q = t_cfg.get("max_questions", MAX_Q)
 
             st.markdown("---")
@@ -849,6 +947,20 @@ if mode == "📱 生徒用（解答・採点・統計）":
                         final_answers[q_key] = q_c2.selectbox(f"問{i}", options=options, index=idx, key=f"sel_{q_key}", label_visibility="collapsed")
 
             st.markdown("---")
+
+            # 3. 重複データ（同じ TEST ID かつ同じ STUDENT ID）の上書き確認
+            has_valid_ids = (len(validation_errors) == 0)
+            is_duplicate = check_duplicate_submission(norm_tid, norm_sid) if has_valid_ids else False
+            confirm_overwrite = True
+
+            if is_duplicate:
+                st.warning(f"⚠️ **TEST ID: {norm_tid} / STUDENT ID: {norm_sid}** は既に採点結果が保存されています。上書きしますか？")
+                confirm_overwrite = st.checkbox(
+                    "はい、既に保存されている採点結果を上書きします",
+                    value=False,
+                    key=f"overwrite_chk_{norm_tid}_{norm_sid}"
+                )
+
             col_bot_btn1, col_bot_btn2 = st.columns([1, 2])
             with col_bot_btn1:
                 if st.button("🔄 再撮影（撮り直す）", key="btn_re_take", use_container_width=True):
@@ -856,9 +968,15 @@ if mode == "📱 生徒用（解答・採点・統計）":
                     st.session_state.step = 1
                     st.rerun()
             with col_bot_btn2:
-                if st.button("この内容で確定して採点する ▶", type="primary", use_container_width=True):
-                    st.session_state.final_test_id = str(test_id_val).zfill(2)
-                    st.session_state.final_student_id = str(student_id_val).zfill(4)
+                can_submit = has_valid_ids and (not is_duplicate or confirm_overwrite)
+                if not has_valid_ids:
+                    st.info("👆 上部のエラー（TEST ID または STUDENT ID）を正しく修正すると確定ボタンが押せるようになります。")
+                elif is_duplicate and not confirm_overwrite:
+                    st.info("👆 上書き保存する場合は、上の「はい、既に保存されている採点結果を上書きします」にチェックを入れてください。")
+
+                if st.button("この内容で確定して採点する ▶", type="primary", use_container_width=True, disabled=not can_submit):
+                    st.session_state.final_test_id = norm_tid
+                    st.session_state.final_student_id = norm_sid
                     st.session_state.final_answers = final_answers
 
                     t_id = st.session_state.final_test_id
@@ -986,12 +1104,13 @@ if mode == "📱 生徒用（解答・採点・統計）":
                                 "rate": sec_rate
                             })
 
-                    save_test_result_to_csv(row_d)
+                    save_test_result_to_csv(row_d, overwrite=is_duplicate)
                     clear_image_session_cache()
 
                     st.session_state.result_total_score = int(t_score)
                     st.session_state.results_list = res_list
                     st.session_state.section_summary = section_summary
+                    st.session_state.show_balloons = True
                     st.session_state.step = 3
                     st.rerun()
 
@@ -1007,7 +1126,8 @@ if mode == "📱 生徒用（解答・採点・統計）":
             target_total = t_cfg.get("total_score", 100)
             t_max_q = t_cfg.get("max_questions", MAX_Q)
 
-            st.balloons()
+            if st.session_state.pop("show_balloons", False):
+                st.balloons()
             st.metric(label=f"【TEST ID: {test_id} / STUDENT ID: {student_id}】 さんの総合点", value=f"{total_score} 点 / {target_total} 点")
 
             if section_summary:
@@ -1184,6 +1304,32 @@ elif mode == "教員用（正解・配点・大問・特殊ルール設定）":
             else:
                 save_password(new_pass1)
                 st.success("教員用パスワードを正常に変更しました！")
+                st.rerun()
+
+        st.markdown("---")
+        with st.expander("🚨 新年度用：全テスト設定・全生徒成績の一括リセット（初期化）", expanded=False):
+            st.error(
+                "**【警告】この操作を実行すると、以下のデータがすべて完全に削除され、元に戻せません：**\n"
+                "- すべての TEST ID の正答・配点・大問区切り・完答ルール・テスト基本設定\n"
+                "- すべての生徒の採点結果（`test_results.csv`）\n\n"
+                "※ 教員用パスワード・グローバル上限設定・Gemini APIキーは保持されます。"
+            )
+            st.info("💡 必要な場合は、実行前に「📝 TEST ID別 正答・配点・大問管理」および「教員用（集計・Excel出力）」からCSV/Excelファイルをダウンロードしてバックアップを保存してください。")
+            
+            reset_word = st.text_input(
+                "確認のため、半角大文字で「RESET」と入力してください",
+                value="",
+                key="annual_reset_word"
+            )
+            reset_chk = st.checkbox(
+                "すべてのテスト設定と生徒成績データが完全に削除されることを理解し、一括削除します",
+                value=False,
+                key="annual_reset_chk"
+            )
+            can_reset_all = (reset_word.strip() == "RESET") and reset_chk
+            if st.button("🗑️ 新年度用に全テスト設定・全生徒成績を一括削除する", type="primary", disabled=not can_reset_all):
+                reset_all_academic_year_data()
+                st.success("✅ すべてのテスト設定と生徒成績データを一括削除しました。新年度の設定を登録できます。")
                 st.rerun()
 
     with tab1:
@@ -1579,7 +1725,6 @@ elif mode == "教員用（集計・Excel出力）":
                         "最低点": "-"
                     })
 
-            # 31〜36以外のIDが含まれている場合の補助行
             other_df = df_cls[~df_cls['クラスコード'].isin(target_classes)]
             if len(other_df) > 0:
                 class_rows.append({
@@ -1614,7 +1759,6 @@ elif mode == "教員用（集計・Excel出力）":
         elif sort_option == "低得点順（昇順）":
             df_display = df_display.sort_values(by=['合計点', 'STUDENT ID'], ascending=[True, True]).reset_index(drop=True)
 
-        # 列の並び順整理：STUDENT ID のすぐ右隣に 合計点 を配置
         df_export = df_display.drop(columns=['_orig_idx']).copy()
         front_cols = [c for c in ['日時', 'TEST ID', 'STUDENT ID', '合計点'] if c in df_export.columns]
         other_cols = [c for c in df_export.columns if c not in front_cols]
@@ -1675,6 +1819,27 @@ elif mode == "教員用（集計・Excel出力）":
                 orig_indices_to_remove = df_display.loc[selected_rows_mask, '_orig_idx'].tolist()
                 delete_rows_from_csv(orig_indices_to_remove)
                 st.success(f"{num_selected} 件のデータを削除しました。")
+                st.rerun()
+
+        st.markdown("---")
+        with st.expander(f"⚠️ 危険な操作：TEST ID [{selected_test_id}] の生徒採点データをすべて一括削除", expanded=False):
+            st.warning(
+                f"**TEST ID [{selected_test_id}]** に保存されている生徒の全採点結果（**{len(df_display)} 件**）をすべて削除します。\n"
+                "※ 他の TEST ID の成績データや、正答・配点の設定自体は消えずに残ります。削除後は元に戻せません。"
+            )
+            confirm_tid_del = st.checkbox(
+                f"TEST ID [{selected_test_id}] の全採点結果（{len(df_display)} 件）を削除することに同意します",
+                value=False,
+                key=f"chk_del_all_{selected_test_id}"
+            )
+            if st.button(
+                f"🗑️ TEST ID [{selected_test_id}] の全採点結果をすべて削除する",
+                type="primary",
+                disabled=not confirm_tid_del,
+                key=f"btn_del_all_{selected_test_id}"
+            ):
+                del_cnt = delete_all_results_by_test_id(selected_test_id)
+                st.success(f"✅ TEST ID [{selected_test_id}] の生徒採点結果（{del_cnt} 件）をすべて削除しました。")
                 st.rerun()
     else:
         st.info("まだ採点データがありません。生徒がマークシートを提出するか、上の「📥 生徒の成績データをインポート」から過去のCSV/Excelファイルを読み込んでください。")
