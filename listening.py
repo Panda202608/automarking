@@ -965,7 +965,7 @@ def analyze_mark_sheet(image_file, max_q=50, num_opts=9):
            logs
 
 # ---------------------------------------------------------
-# 模範解答 AI自動読み取り関数（正答情報のみ抽出・高速軽量化・回転対応版）
+# 模範解答 AI自動読み取り関数（正答情報のみ抽出・回転対応・厳密JSON出力版）
 # ---------------------------------------------------------
 def analyze_master_answer_sheet_ai(image_file, api_key, max_q_limit=50, rotate_deg=0):
     if not HAS_GENAI:
@@ -994,12 +994,16 @@ def analyze_master_answer_sheet_ai(image_file, api_key, max_q_limit=50, rotate_d
 
         model = genai.GenerativeModel(
             'gemini-3.8-flash',
-            generation_config={"temperature": 0.0, "max_output_tokens": 1024}
+            generation_config={
+                "temperature": 0.0,
+                "max_output_tokens": 4096,
+                "response_mime_type": "application/json"
+            }
         )
 
         prompt = f"""
-        添付されたテストの模範解答・解答一覧表の画像を精密に解析し、各解答番号の「正答（正解の選択肢番号）」のみを抽出してJSON形式で出力してください。
-        配点や大問の情報は不要です。正答のみを正確に読み取ってください。
+        添付されたテストの模範解答・解答一覧表の画像を精密に解析し、Q1からQ{max_q_limit}までのすべての設問の「正答（正解の選択肢番号）」を省略せずにJSON形式で出力してください。
+        配点や大問の情報は不要です。途中で「...」などで省略せず、全問分を1つずつ出力してください。
 
         【画像の種類ごとの正答判別ルール（どちらの形式にも対応してください）】
         1. **マーク黒塗り型（解答欄に 1 2 3 4 5 6 7 8 9 や 0 が並んでいる表）**:
@@ -1013,19 +1017,26 @@ def analyze_master_answer_sheet_ai(image_file, api_key, max_q_limit=50, rotate_d
         3. 選択肢が「0」の場合（⓪や黒塗り0）は整数 `0` として出力してください。
         4. 解答番号は Q1 〜 Q{max_q_limit} の範囲で読み取ってください。
 
-        必ず以下のJSONフォーマットのみを出力してください（余計な解説文は不要）：
+        出力するJSONスキーマ:
         {{
           "answers": {{"Q1": 1, "Q2": 3, "Q3": 4}}
         }}
         """
 
         response = model.generate_content([prompt, pil_img])
-        text_resp = response.text.strip()
+        text_resp = (response.text or "").strip()
+        if not text_resp:
+            return None, "AIからの応答が空でした。もう一度ボタンを押して再試行してください。"
 
         if "```json" in text_resp:
             text_resp = text_resp.split("```json")[1].split("```")[0].strip()
         elif "```" in text_resp:
             text_resp = text_resp.split("```")[1].split("```")[0].strip()
+
+        start_idx = text_resp.find("{")
+        end_idx = text_resp.rfind("}")
+        if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
+            text_resp = text_resp[start_idx:end_idx + 1]
 
         extracted_data = json.loads(text_resp)
         raw_answers = extracted_data.get("answers", {})
@@ -1054,7 +1065,7 @@ def analyze_master_answer_sheet_ai(image_file, api_key, max_q_limit=50, rotate_d
     except Exception as e:
         err_str = str(e)
         if "429" in err_str or "Quota exceeded" in err_str:
-            return None, "⏳ Gemini APIの無料枠上限（1分間に5回まで）に達しました。40秒ほど待ってから、もう一度1回だけボタンを押してください。"
+            return None, "⏳ APIのリクエスト上限に達しました。少し待ってからもう一度お試しください。"
         return None, f"Gemini APIによる解析エラー: {e}"
 
 # --- 設定ロード ---
