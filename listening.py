@@ -1,4 +1,5 @@
 import streamlit as st
+import streamlit.components.v1 as components
 import pandas as pd
 import json
 import os
@@ -45,6 +46,76 @@ PASSWORD_FILE = os.path.join(DATA_DIR, "password.json")
 GEMINI_KEY_FILE = os.path.join(DATA_DIR, "gemini_key.json")
 
 st.set_page_config(page_title="共通テスト採点・集計システム", layout="wide")
+
+# ---------------------------------------------------------
+# 5分間無操作でサーバーとの通信を自動切断する仕組み（待機課金防止）
+# ---------------------------------------------------------
+components.html(
+    """
+    <script>
+    (function() {
+        const parentWin = window.parent;
+        const parentDoc = parentWin.document;
+        const TIMEOUT_MS = 5 * 60 * 1000; // 5分（300,000ミリ秒）
+
+        if (!parentWin._wsList) {
+            parentWin._wsList = [];
+            const OrigWS = parentWin.WebSocket;
+            parentWin.WebSocket = function(url, protocols) {
+                const ws = protocols ? new OrigWS(url, protocols) : new OrigWS(url);
+                parentWin._wsList.push(ws);
+                return ws;
+            };
+            parentWin.WebSocket.prototype = OrigWS.prototype;
+        }
+
+        function disconnectSession() {
+            parentWin._isTimedOut = true;
+            if (parentWin._wsList) {
+                parentWin._wsList.forEach(ws => {
+                    try { ws.close(); } catch (e) {}
+                });
+            }
+            parentDoc.open();
+            parentDoc.write(`
+                <!DOCTYPE html>
+                <html lang="ja">
+                <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"></head>
+                <body style="font-family: sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; background: #f8fafc; color: #1e293b; text-align: center;">
+                    <div style="background: white; padding: 2rem; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); max-width: 400px; margin: 1rem;">
+                        <h2 style="margin-top: 0; color: #0f172a;">⏱️ 自動切断しました</h2>
+                        <p style="color: #475569; line-height: 1.6;">5分間操作がなかったため、サーバーとの通信を自動的に切断しました。</p>
+                        <button onclick="location.reload()" style="background: #2563eb; color: white; border: none; padding: 0.8rem 1.5rem; font-size: 1rem; border-radius: 8px; cursor: pointer; font-weight: bold; margin-top: 0.5rem;">
+                            再接続する
+                        </button>
+                    </div>
+                </body>
+                </html>
+            `);
+            parentDoc.close();
+        }
+
+        function resetTimer() {
+            if (parentWin._isTimedOut) return;
+            if (parentWin._idleTimer) {
+                parentWin.clearTimeout(parentWin._idleTimer);
+            }
+            parentWin._idleTimer = parentWin.setTimeout(disconnectSession, TIMEOUT_MS);
+        }
+
+        if (!parentWin._idleListenerAttached) {
+            parentWin._idleListenerAttached = true;
+            ['mousedown', 'touchstart', 'keydown', 'scroll'].forEach(evt => {
+                parentDoc.addEventListener(evt, resetTimer, { passive: true });
+            });
+        }
+
+        resetTimer();
+    })();
+    </script>
+    """,
+    height=0,
+)
 
 # ---------------------------------------------------------
 # カスタムCSS
@@ -1712,7 +1783,7 @@ elif mode == "管理者用":
         t_max_q = int(t_config.get("max_questions", 37))
         t_total_score = int(t_config.get("total_score", 100))
 
-        # ★重要：ウィジェットを描画する「前」にのみ session_state を同期する（StreamlitAPIException防止）
+        # ウィジェットを描画する「前」にのみ session_state を同期する（StreamlitAPIException防止）
         force_reload = st.session_state.pop(f"force_reload_{target_test_id}", False)
         if force_reload or "prev_target_test_id" not in st.session_state or st.session_state.prev_target_test_id != target_test_id:
             st.session_state.prev_target_test_id = target_test_id
