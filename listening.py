@@ -965,9 +965,9 @@ def analyze_mark_sheet(image_file, max_q=50, num_opts=9):
            logs
 
 # ---------------------------------------------------------
-# 模範解答 AI自動読み取り関数（正答情報のみ抽出・高精細＆十分出力枠版）
+# 模範解答 AI自動読み取り関数（正答情報のみ抽出・高速軽量化・回転対応版）
 # ---------------------------------------------------------
-def analyze_master_answer_sheet_ai(image_file, api_key, max_q_limit=50):
+def analyze_master_answer_sheet_ai(image_file, api_key, max_q_limit=50, rotate_deg=0):
     if not HAS_GENAI:
         return None, "google-generativeai ライブラリがインストールされていません。"
     if not api_key:
@@ -975,17 +975,26 @@ def analyze_master_answer_sheet_ai(image_file, api_key, max_q_limit=50):
 
     try:
         genai.configure(api_key=api_key)
+        image_file.seek(0)
         pil_img = Image.open(image_file)
         pil_img = ImageOps.exif_transpose(pil_img)
 
-        # 細かいマーク表の数字も潰れないよう長辺2048pxに調整して高速化
+        # 指定された角度で画像を回転
+        if rotate_deg == 90:
+            pil_img = pil_img.rotate(-90, expand=True)
+        elif rotate_deg == 270:
+            pil_img = pil_img.rotate(90, expand=True)
+        elif rotate_deg == 180:
+            pil_img = pil_img.rotate(180, expand=True)
+
+        # 高解像度画像を長辺1600pxに縮小してアップロードとAI解析を高速化
         if pil_img.mode != "RGB":
             pil_img = pil_img.convert("RGB")
-        pil_img.thumbnail((2048, 2048), Image.Resampling.LANCZOS)
+        pil_img.thumbnail((1600, 1600), Image.Resampling.LANCZOS)
 
         model = genai.GenerativeModel(
             'gemini-3.8-flash',
-            generation_config={"temperature": 0.0, "max_output_tokens": 8192}
+            generation_config={"temperature": 0.0, "max_output_tokens": 1024}
         )
 
         prompt = f"""
@@ -1011,19 +1020,12 @@ def analyze_master_answer_sheet_ai(image_file, api_key, max_q_limit=50):
         """
 
         response = model.generate_content([prompt, pil_img])
-        text_resp = (response.text or "").strip()
-        if not text_resp:
-            return None, "AIからの応答が空でした。もう一度ボタンを押して再試行してください。"
+        text_resp = response.text.strip()
 
         if "```json" in text_resp:
             text_resp = text_resp.split("```json")[1].split("```")[0].strip()
         elif "```" in text_resp:
             text_resp = text_resp.split("```")[1].split("```")[0].strip()
-
-        start_idx = text_resp.find("{")
-        end_idx = text_resp.rfind("}")
-        if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
-            text_resp = text_resp[start_idx:end_idx + 1]
 
         extracted_data = json.loads(text_resp)
         raw_answers = extracted_data.get("answers", {})
@@ -1052,7 +1054,7 @@ def analyze_master_answer_sheet_ai(image_file, api_key, max_q_limit=50):
     except Exception as e:
         err_str = str(e)
         if "429" in err_str or "Quota exceeded" in err_str:
-            return None, "⏳ APIのリクエスト上限に達しました。少し待ってからもう一度お試しください。"
+            return None, "⏳ Gemini APIの無料枠上限（1分間に5回まで）に達しました。40秒ほど待ってから、もう一度1回だけボタンを押してください。"
         return None, f"Gemini APIによる解析エラー: {e}"
 
 # --- 設定ロード ---
@@ -1064,6 +1066,7 @@ saved_gemini_key = load_gemini_key()
 
 if "step" not in st.session_state: st.session_state.step = 1
 if "is_authenticated" not in st.session_state: st.session_state.is_authenticated = False
+if "manual_entry_mode" not in st.session_state: st.session_state.manual_entry_mode = False
 
 mode = st.sidebar.radio("モード選択", ["生徒用", "教員用", "管理者用"])
 
@@ -1107,6 +1110,7 @@ if mode == "生徒用":
                 if st.button("この画像を解析して進む ▶", type="primary", use_container_width=True):
                     with st.spinner("マークを自動読み取り中..."):
                         test_id, exam_id, answers, debug_main, img_exam, img_q1, img_q2, logs = analyze_mark_sheet(uploaded_file, MAX_Q, NUM_OPTS)
+                        st.session_state.manual_entry_mode = False
                         st.session_state.uploaded_image = uploaded_file
                         st.session_state.recognized_test_id = test_id
                         st.session_state.recognized_exam_id = exam_id
@@ -1119,35 +1123,55 @@ if mode == "生徒用":
                         st.session_state.step = 2
                         st.rerun()
 
+            st.markdown("---")
+            st.caption("📷 画像がうまく認識されない場合や、カメラを使えない場合はこちらから直接入力できます。")
+            if st.button("✍️ 手動で自分の解答を入力する ▶", use_container_width=True):
+                clear_image_session_cache()
+                st.session_state.manual_entry_mode = True
+                st.session_state.recognized_test_id = ""
+                st.session_state.recognized_exam_id = ""
+                st.session_state.recognized_answers = {f'Q{i}': "未マーク/無効" for i in range(1, MAX_Q + 1)}
+                st.session_state.logs = []
+                st.session_state.step = 2
+                st.rerun()
+
         elif st.session_state.step == 2:
-            st.subheader("STEP 2: 読み取り結果の確認・修正")
+            is_manual = st.session_state.get("manual_entry_mode", False)
+            st.subheader("STEP 2: 解答の入力・確認・修正" if is_manual else "STEP 2: 読み取り結果の確認・修正")
             
+            back_btn_label = "⬅️ 最初の画面に戻る" if is_manual else "🔄 再撮影（撮り直す）"
             col_top_btn1, col_top_btn2 = st.columns([1, 2])
             with col_top_btn1:
-                if st.button("🔄 再撮影（撮り直す）", type="secondary", use_container_width=True):
+                if st.button(back_btn_label, type="secondary", use_container_width=True):
                     clear_image_session_cache()
+                    st.session_state.manual_entry_mode = False
                     st.session_state.step = 1
                     st.rerun()
 
-            with st.expander("🔍 デバッグ画像（検出範囲と読み取り位置）", expanded=True):
-                for l in st.session_state.get("logs", []): st.info(l)
-                c1, c2, c3 = st.columns([1, 1.5, 1.5])
-                with c1:
-                    st.caption("【TEST ID & STUDENT ID】")
-                    if st.session_state.img_exam is not None: st.image(st.session_state.img_exam, use_container_width=True)
-                with c2:
-                    st.caption("【問 1 〜 25】")
-                    if st.session_state.img_q1 is not None: st.image(st.session_state.img_q1, use_container_width=True)
-                with c3:
-                    st.caption("【問 26 〜 50】")
-                    if st.session_state.img_q2 is not None: st.image(st.session_state.img_q2, use_container_width=True)
+            if is_manual:
+                st.info("✍️ **手動入力モード**：下の「TEST ID」と「STUDENT ID」を入力し、各問の解答を選択してください。")
+            else:
+                with st.expander("🔍 デバッグ画像（検出範囲と読み取り位置）", expanded=True):
+                    for l in st.session_state.get("logs", []): st.info(l)
+                    c1, c2, c3 = st.columns([1, 1.5, 1.5])
+                    with c1:
+                        st.caption("【TEST ID & STUDENT ID】")
+                        if st.session_state.img_exam is not None: st.image(st.session_state.img_exam, use_container_width=True)
+                    with c2:
+                        st.caption("【問 1 〜 25】")
+                        if st.session_state.img_q1 is not None: st.image(st.session_state.img_q1, use_container_width=True)
+                    with c3:
+                        st.caption("【問 26 〜 50】")
+                        if st.session_state.img_q2 is not None: st.image(st.session_state.img_q2, use_container_width=True)
 
-            raw_test_id = st.session_state.recognized_test_id.zfill(2)
-            raw_student_id = st.session_state.recognized_exam_id.zfill(4)
+            raw_tid_state = st.session_state.get("recognized_test_id", "")
+            raw_sid_state = st.session_state.get("recognized_exam_id", "")
+            raw_test_id = raw_tid_state.zfill(2) if raw_tid_state else ""
+            raw_student_id = raw_sid_state.zfill(4) if raw_sid_state else ""
             
             c_id1, c_id2 = st.columns(2)
             with c_id1:
-                test_id_val = st.text_input("TEST ID (2桁)", value=raw_test_id)
+                test_id_val = st.text_input("TEST ID (2桁 例: 01)", value=raw_test_id)
             with c_id2:
                 student_id_val = st.text_input("STUDENT ID (年・組・番・号: 3101〜3645)", value=raw_student_id)
 
@@ -1161,23 +1185,23 @@ if mode == "生徒用":
             registered_tids = get_registered_test_ids()
             if not clean_tid.isdigit() or len(clean_tid) > 2:
                 validation_errors.append(
-                    f"❌ **TEST ID エラー**: 「{test_id_val}」は正しくありません。2桁の半角数字（例: 01）に手で修正してください。"
+                    f"❌ **TEST ID エラー**: 「{test_id_val}」は正しくありません。2桁の半角数字（例: 01）を入力してください。"
                 )
             elif not is_test_id_registered(norm_tid):
                 hint_str = f"（現在登録済みの TEST ID: {', '.join(registered_tids)}）" if registered_tids else "（現在登録済みの TEST ID はありません）"
                 validation_errors.append(
-                    f"❌ **未登録の TEST ID**: TEST ID「**{norm_tid}**」には解答が登録されていません。上の「TEST ID (2桁)」欄を手で正しい番号に修正してください。{hint_str}"
+                    f"❌ **未登録の TEST ID**: TEST ID「**{norm_tid}**」には解答が登録されていません。上の「TEST ID (2桁)」欄に正しい番号を入力してください。{hint_str}"
                 )
 
             if not clean_sid.isdigit() or len(clean_sid) != 4:
                 validation_errors.append(
-                    f"❌ **STUDENT ID エラー**: 「{student_id_val}」は4桁の半角数字ではありません。**3101〜3645** の範囲で手で修正してください。"
+                    f"❌ **STUDENT ID エラー**: 「{student_id_val}」は4桁の半角数字ではありません。**3101〜3645** の範囲で入力してください。"
                 )
             else:
                 sid_num = int(clean_sid)
                 if sid_num < 3101 or sid_num > 3645:
                     validation_errors.append(
-                        f"❌ **STUDENT ID 範囲外エラー**: 「**{clean_sid}**」は有効範囲（**3101〜3645**）を逸脱しています。上の「STUDENT ID」欄を手で正しい出席番号に修正してください。"
+                        f"❌ **STUDENT ID 範囲外エラー**: 「**{clean_sid}**」は有効範囲（**3101〜3645**）を逸脱しています。上の「STUDENT ID」欄に正しい出席番号を入力してください。"
                     )
 
             for err_msg in validation_errors:
@@ -1227,8 +1251,9 @@ if mode == "生徒用":
 
             col_bot_btn1, col_bot_btn2 = st.columns([1, 2])
             with col_bot_btn1:
-                if st.button("🔄 再撮影（撮り直す）", key="btn_re_take", use_container_width=True):
+                if st.button(back_btn_label, key="btn_re_take", use_container_width=True):
                     clear_image_session_cache()
+                    st.session_state.manual_entry_mode = False
                     st.session_state.step = 1
                     st.rerun()
             with col_bot_btn2:
@@ -1338,6 +1363,7 @@ if mode == "生徒用":
 
                     save_test_result_to_csv(row_d, overwrite=is_duplicate)
                     clear_image_session_cache()
+                    st.session_state.manual_entry_mode = False
 
                     st.session_state.result_total_score = int(t_score)
                     st.session_state.results_list = res_list
@@ -1449,6 +1475,7 @@ if mode == "生徒用":
             st.markdown("---")
             if st.button("次の解答を採点する ▶", type="primary", use_container_width=True):
                 clear_image_session_cache()
+                st.session_state.manual_entry_mode = False
                 st.session_state.step = 1
                 st.rerun()
 
@@ -1858,10 +1885,43 @@ elif mode == "管理者用":
             master_img_file = st.file_uploader("解答例の画像を選択（JPG, PNG）", type=["jpg", "jpeg", "png"], key=f"master_img_uploader_{target_test_id}")
             
             if master_img_file is not None:
-                st.image(master_img_file, caption="アップロードした解答例画像", width=400)
+                rot_key = f"ai_rot_deg_{target_test_id}"
+                if rot_key not in st.session_state:
+                    st.session_state[rot_key] = 0
+
+                col_rot1, col_rot2, col_rot3, col_rot4 = st.columns([1.2, 1.2, 1.2, 1.4])
+                with col_rot1:
+                    if st.button("🔄 右に90度回転", key=f"btn_rot_right_{target_test_id}", use_container_width=True):
+                        st.session_state[rot_key] = (st.session_state[rot_key] + 90) % 360
+                        st.rerun()
+                with col_rot2:
+                    if st.button("🔄 左に90度回転", key=f"btn_rot_left_{target_test_id}", use_container_width=True):
+                        st.session_state[rot_key] = (st.session_state[rot_key] - 90) % 360
+                        st.rerun()
+                with col_rot3:
+                    if st.button("↩️ 向きをリセット", key=f"btn_rot_reset_{target_test_id}", use_container_width=True):
+                        st.session_state[rot_key] = 0
+                        st.rerun()
+                with col_rot4:
+                    st.write("")
+                    st.caption(f"現在の回転: **{st.session_state[rot_key]}度**")
+
+                selected_deg = st.session_state[rot_key]
+
+                master_img_file.seek(0)
+                preview_img = Image.open(master_img_file)
+                preview_img = ImageOps.exif_transpose(preview_img)
+                if selected_deg == 90:
+                    preview_img = preview_img.rotate(-90, expand=True)
+                elif selected_deg == 270:
+                    preview_img = preview_img.rotate(90, expand=True)
+                elif selected_deg == 180:
+                    preview_img = preview_img.rotate(180, expand=True)
+
+                st.image(preview_img, caption=f"アップロードした解答例画像（回転: {selected_deg}度）", width=400)
                 if st.button("🤖 この画像から「正答」のみを自動抽出して下の欄に入れる ▶", type="primary", key=f"btn_ai_ans_{target_test_id}"):
                     with st.spinner("Gemini AIが解答画像から正答番号を読み取り中..."):
-                        ext_data, msg = analyze_master_answer_sheet_ai(master_img_file, active_api_key, max_q_limit=t_max_q)
+                        ext_data, msg = analyze_master_answer_sheet_ai(master_img_file, active_api_key, max_q_limit=t_max_q, rotate_deg=selected_deg)
                         if ext_data and "answers" in ext_data:
                             extracted_ans = ext_data["answers"]
                             for i in range(1, t_max_q + 1):
