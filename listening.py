@@ -147,10 +147,22 @@ def save_sections_config(test_id, sections_list):
     data[t_key] = sections_list
     save_json_file(SECTIONS_KEY_FILE, data)
 
+def clamp_session_int(key, min_val, max_val, default_val):
+    """session_state内の数値入力値がmax_valを超えてStreamlitエラーになるのを防ぐ"""
+    safe_default = max(min_val, min(int(default_val), max_val))
+    if key in st.session_state:
+        try:
+            curr = int(st.session_state[key])
+            if curr < min_val or curr > max_val:
+                st.session_state[key] = safe_default
+        except Exception:
+            st.session_state[key] = safe_default
+    return safe_default
+
 def sync_sections_to_session(test_id, sections_list, max_q):
-    """大問区切りの設定値をセッションステートに同期し、画面上の入力欄へ即座に反映させる"""
+    """大問区切りの設定値をセッションステートに同期する（※必ずウィジェット描画前にのみ呼ぶ）"""
     t_key = str(test_id).zfill(2)
-    sec_count = max(len(sections_list), 1)
+    sec_count = max(1, min(len(sections_list), 10))
     st.session_state[f"num_sec_{t_key}"] = sec_count
 
     for idx in range(10):
@@ -204,6 +216,123 @@ def save_special_rules(test_id, rules_list):
     t_key = str(test_id).zfill(2)
     data[t_key] = rules_list
     save_json_file(RULES_KEY_FILE, data)
+
+def get_rule_question_numbers(r):
+    """特殊ルールが対象とする設問番号のリストを返す"""
+    r_type = r.get("type", "range")
+    if r_type in ("range", "unordered_only"):
+        return list(range(int(r.get("start", 1)), int(r.get("end", 1)) + 1))
+    elif r_type == "unordered_combo":
+        qs = list(range(int(r.get("unordered_start", 1)), int(r.get("unordered_end", 1)) + 1))
+        if int(r.get("extra_start", 0)) > 0 and int(r.get("extra_end", 0)) > 0:
+            qs.extend(range(int(r.get("extra_start", 1)), int(r.get("extra_end", 1)) + 1))
+        return qs
+    return []
+
+def get_rule_max_points(r):
+    """特殊ルール単体の最大獲得点数を返す"""
+    r_type = r.get("type", "range")
+    if r_type == "unordered_only" and r.get("partial", False):
+        q_cnt = max(0, int(r.get("end", 1)) - int(r.get("start", 1)) + 1)
+        return int(r.get("points", 0)) * q_cnt
+    return int(r.get("points", 0))
+
+def evaluate_special_rule(r, user_answers, ans_key):
+    """特殊ルールを採点し、(獲得点数, 全問達成フラグ, 問題別正誤辞書) を返す"""
+    r_type = r.get("type", "range")
+    q_correct_map = {}
+
+    if r_type == "range":
+        s, e = int(r["start"]), int(r["end"])
+        all_c = True
+        for q_num in range(s, e + 1):
+            q = f'Q{q_num}'
+            is_c = (user_answers.get(q) == ans_key.get(q))
+            q_correct_map[q] = is_c
+            if not is_c:
+                all_c = False
+        earned = int(r["points"]) if all_c else 0
+        return earned, all_c, q_correct_map
+
+    elif r_type == "unordered_only":
+        s, e = int(r["start"]), int(r["end"])
+        is_partial = bool(r.get("partial", False))
+        pts_unit = int(r.get("points", 0))
+
+        remaining_correct = [str(ans_key.get(f'Q{i}')) for i in range(s, e + 1)]
+        matched_count = 0
+        for q_num in range(s, e + 1):
+            q = f'Q{q_num}'
+            u_str = str(user_answers.get(q))
+            if u_str in remaining_correct:
+                remaining_correct.remove(u_str)
+                q_correct_map[q] = True
+                matched_count += 1
+            else:
+                q_correct_map[q] = False
+
+        total_qs = e - s + 1
+        all_c = (matched_count == total_qs)
+        if is_partial:
+            earned = pts_unit * matched_count
+        else:
+            earned = pts_unit if all_c else 0
+        return earned, all_c, q_correct_map
+
+    elif r_type == "unordered_combo":
+        u_start, u_end = int(r.get("unordered_start", 1)), int(r.get("unordered_end", 1))
+        e_start, e_end = int(r.get("extra_start", 0)), int(r.get("extra_end", 0))
+
+        remaining_u = [str(ans_key.get(f'Q{i}')) for i in range(u_start, u_end + 1)]
+        u_matched = 0
+        for q_num in range(u_start, u_end + 1):
+            q = f'Q{q_num}'
+            u_str = str(user_answers.get(q))
+            if u_str in remaining_u:
+                remaining_u.remove(u_str)
+                q_correct_map[q] = True
+                u_matched += 1
+            else:
+                q_correct_map[q] = False
+        u_ok = (u_matched == (u_end - u_start + 1))
+
+        e_ok = True
+        if e_start > 0 and e_end > 0:
+            for i in range(e_start, e_end + 1):
+                q = f'Q{i}'
+                is_c = (user_answers.get(q) == ans_key.get(q))
+                q_correct_map[q] = is_c
+                if not is_c:
+                    e_ok = False
+
+        all_c = u_ok and e_ok
+        earned = int(r["points"]) if all_c else 0
+        return earned, all_c, q_correct_map
+
+    return 0, False, q_correct_map
+
+def format_special_rule_label(r):
+    """特殊ルール一覧表示用の文字列を生成する"""
+    r_type = r.get("type", "range")
+    if r_type == "range":
+        return f"・ **【通常完答】問 {r['start']} 〜 問 {r['end']}** ： 全問正解で **{r['points']} 点**"
+    elif r_type == "unordered_only":
+        if r.get("partial", False):
+            q_cnt = int(r['end']) - int(r['start']) + 1
+            return f"・ **【順不同（部分点あり）】問 {r['start']} 〜 問 {r['end']}** ： 順不同で1問正解ごとに **{r['points']} 点**（最大 {int(r['points']) * q_cnt} 点）"
+        else:
+            return f"・ **【順不同（完答）】問 {r['start']} 〜 問 {r['end']}** ： 順不同で全問正解のとき **{r['points']} 点**"
+    elif r_type == "unordered_combo":
+        base_txt = f"・ **【順不同＋完答】問 {r['unordered_start']} 〜 問 {r['unordered_end']}**（順不同）"
+        e_s = int(r.get("extra_start", 0))
+        e_e = int(r.get("extra_end", 0))
+        if e_s > 0 and e_e > 0:
+            if e_s == e_e:
+                base_txt += f" ＋ **問 {e_s}**"
+            else:
+                base_txt += f" ＋ **問 {e_s} 〜 問 {e_e}**"
+        return f"{base_txt} ： 全問正解で **{r['points']} 点**"
+    return str(r)
 
 def is_test_id_registered(test_id):
     """正答データが1問以上登録されているTEST IDかどうかを判定する"""
@@ -269,7 +398,7 @@ def export_test_settings_csv(test_id):
                 "項目3": r.get("end", 1),
                 "項目4": r.get("points", 0)
             })
-        elif r_type == "unordered_combo":
+        else:
             rows.append({
                 "種別": "RULE_JSON",
                 "項目1": json.dumps(r, ensure_ascii=False),
@@ -356,14 +485,7 @@ def import_test_settings_csv(uploaded_csv, target_test_id):
         save_answer_key(target_test_id, new_ans)
         save_points_key(target_test_id, new_pts)
 
-        sync_sections_to_session(target_test_id, new_sections, max_q)
-        st.session_state[f"cfg_max_q_{target_test_id}"] = max_q
-        st.session_state[f"cfg_total_sc_{target_test_id}"] = total_sc
-
-        for i in range(1, 51):
-            q_k = f"Q{i}"
-            st.session_state[f"ans_{target_test_id}_{q_k}"] = new_ans.get(q_k, 1)
-            st.session_state[f"pts_{target_test_id}_{q_k}"] = new_pts.get(q_k, 2)
+        st.session_state[f"force_reload_{target_test_id}"] = True
 
         return True, f"✅ CSVから TEST ID [{target_test_id}] の設定（全{max_q}問・満点{total_sc}点）を読み込みました！"
     except Exception as e:
@@ -529,7 +651,7 @@ def reset_all_academic_year_data():
     for filepath in [ANSWER_KEY_FILE, POINTS_KEY_FILE, TEST_CONFIG_FILE, RULES_KEY_FILE, SECTIONS_KEY_FILE]:
         if os.path.exists(filepath):
             os.remove(filepath)
-    keys_to_clear = [k for k in st.session_state.keys() if k.startswith(("ans_", "pts_", "sec_", "num_sec_", "cfg_", "prev_target_test_id"))]
+    keys_to_clear = [k for k in st.session_state.keys() if k.startswith(("ans_", "pts_", "sec_", "num_sec_", "cfg_", "prev_target_test_id", "force_reload_"))]
     for k in keys_to_clear:
         del st.session_state[k]
 
@@ -772,9 +894,9 @@ def analyze_mark_sheet(image_file, max_q=50, num_opts=9):
            logs
 
 # ---------------------------------------------------------
-# 模範解答 AI自動読み取り関数
+# 模範解答 AI自動読み取り関数（正答情報のみ抽出）
 # ---------------------------------------------------------
-def analyze_master_answer_sheet_ai(image_file, api_key):
+def analyze_master_answer_sheet_ai(image_file, api_key, max_q_limit=50):
     if not HAS_GENAI:
         return None, "google-generativeai ライブラリがインストールされていません。"
     if not api_key:
@@ -785,31 +907,28 @@ def analyze_master_answer_sheet_ai(image_file, api_key):
         pil_img = Image.open(image_file)
         pil_img = ImageOps.exif_transpose(pil_img)
         
-        model = genai.GenerativeModel('gemini-1.5-flash')
+        model = genai.GenerativeModel('gemini-2.5-flash')
         
-        prompt = """
-        添付されたテストの模範解答・正答一覧表の画像を精密に解析し、結果をJSON形式のみで出力してください。
+        prompt = f"""
+        添付されたテストの模範解答・解答一覧表の画像を精密に解析し、各解答番号の「正答（正解の選択肢番号）」のみを抽出してJSON形式で出力してください。
+        配点や大問の情報は不要です。正答のみを正確に読み取ってください。
 
-        【重要：正答マークの判別ルール】
-        1. 各解答番号の「解答欄（1 2 3 4 5 6 0 等）」の中で、**「黒く塗りつぶされて数字が白抜きになっている（黒地の）マス」が正解（正答）**です。
-        2. 「白地に黒文字」になっているマスは非選択ですので無視してください。
-        3. 選択肢が「0」から始まる場合（⓪など）は正答数字「0」として認識してください。
+        【画像の種類ごとの正答判別ルール（どちらの形式にも対応してください）】
+        1. **マーク黒塗り型（解答欄に 1 2 3 4 5 6 7 8 9 や 0 が並んでいる表）**:
+           - **黒く塗りつぶされて数字が白抜きになっている（黒丸・黒地の）マス**の数字が正答です。
+           - 白地に黒文字の丸数字は非選択ですので無視してください。
+        2. **正解番号記載型（「解答番号」列と「正解」列が並んでいる表）**:
+           - 画像が横向き（90度回転など）で撮影されている場合は、文字の向きを正しく頭の中で回転させてから読み取ってください。
+           - 「正答率順設問番号」などの右側のランキング表ではなく、左側の「解答番号（1〜{max_q_limit}）」と「正解」の対応表を読み取ってください。
+           - 「正解」欄に書かれている丸数字（例: ①→1, ②→2, ③→3, ④→4, ⑤→5, ⑥→6, ⓪→0）を半角整数に変換してください。
+           - 「22-23 ③-⑤」のように1行に複数問がまとまっている場合は、Q22: 3, Q23: 5 のように個別の設問に分けて出力してください。
+        3. 選択肢が「0」の場合（⓪や黒塗り0）は整数 `0` として出力してください。
+        4. 解答番号は Q1 〜 Q{max_q_limit} の範囲で読み取ってください。
 
-        【配点と特殊ルールの判別ルール】
-        1. 「配点」列に書かれている数字を取得してください。
-        2. 「*4」や「*2」のようなアスタリスク付き配点は完答ルールとして special_rules に抽出してください。
-           - 完答対象となった個別の問題配点は 0 にしてください。
-        3. 大問の見出し（「第1問」「第2問」等）から sections を抽出してください。
-
-        必ず以下のフォーマットでJSONのみを出力してください：
-        {
-          "max_questions": 問題数(整数),
-          "total_score": 目標満点(整数),
-          "answers": {"Q1": 正答番号, "Q2": 正答番号},
-          "points": {"Q1": 配点, "Q2": 配点},
-          "special_rules": [{"type": "range", "start": 18, "end": 21, "points": 4}],
-          "sections": [{"name": "第1問", "start": 1, "end": 7}]
-        }
+        必ず以下のJSONフォーマットのみを出力してください（余計な解説文は不要）：
+        {{
+          "answers": {{"Q1": 1, "Q2": 3, "Q3": 4}}
+        }}
         """
 
         response = model.generate_content([prompt, pil_img])
@@ -821,7 +940,28 @@ def analyze_master_answer_sheet_ai(image_file, api_key):
             text_resp = text_resp.split("```")[1].split("```")[0].strip()
 
         extracted_data = json.loads(text_resp)
-        return extracted_data, "✨ AIによる模範解答の自動読み取りが完了しました！下のフォームで確認してください。"
+        raw_answers = extracted_data.get("answers", {})
+        if not isinstance(raw_answers, dict) or len(raw_answers) == 0:
+            return None, "画像から正答データを読み取れませんでした。画像が鮮明か確認してください。"
+
+        clean_answers = {}
+        for k, v in raw_answers.items():
+            q_str = str(k).strip().upper()
+            if not q_str.startswith("Q"):
+                if q_str.isdigit():
+                    q_str = f"Q{int(q_str)}"
+                else:
+                    continue
+            try:
+                ans_int = int(str(v).strip())
+                clean_answers[q_str] = ans_int
+            except ValueError:
+                pass
+
+        if not clean_answers:
+            return None, "有効な正答番号が抽出できませんでした。"
+
+        return {"answers": clean_answers}, f"✨ AIによる正答の自動抽出が完了しました（{len(clean_answers)}問分）！下の正答欄を確認し、最後に「一括保存」を押してください。"
 
     except Exception as e:
         return None, f"Gemini APIによる解析エラー: {e}"
@@ -830,26 +970,33 @@ def analyze_master_answer_sheet_ai(image_file, api_key):
 global_config = load_global_config()
 MAX_Q = global_config.get("max_questions", 50)
 NUM_OPTS = global_config.get("num_options", 9)
-teacher_password = load_password()
+shared_password = load_password()
 saved_gemini_key = load_gemini_key()
 
 if "step" not in st.session_state: st.session_state.step = 1
+if "is_authenticated" not in st.session_state: st.session_state.is_authenticated = False
 
-mode = st.sidebar.radio("モード選択", ["📱 生徒用（解答・採点・統計）", "教員用（正解・配点・大問・特殊ルール設定）", "教員用（集計・Excel出力）"])
+mode = st.sidebar.radio("モード選択", ["生徒用", "教員用", "管理者用"])
 
-if mode in ["教員用（正解・配点・大問・特殊ルール設定）", "教員用（集計・Excel出力）"]:
-    st.subheader("🔒 教員用認証")
-    input_pass = st.text_input("教員用パスワードを入力してください", type="password")
-    if input_pass != teacher_password:
-        if input_pass:
+# 教員用・管理者用は共通のパスワードで認証
+if mode in ["教員用", "管理者用"]:
+    if not st.session_state.is_authenticated:
+        st.subheader(f"🔒 {mode}認証")
+        input_pass = st.text_input("パスワードを入力してください", type="password", key="auth_shared_pass")
+        if input_pass == shared_password:
+            st.session_state.is_authenticated = True
+            st.rerun()
+        elif input_pass:
             st.error("パスワードが正しくありません。")
+            st.stop()
         else:
-            st.info("この機能を利用するには教員用パスワードの入力が必要です。")
-        st.stop()
-    st.success("認証に成功しました。")
-    st.markdown("---")
+            st.info(f"{mode}機能を利用するにはパスワードの入力が必要です。")
+            st.stop()
 
-if mode == "📱 生徒用（解答・採点・統計）":
+# =========================================================
+# 1. 生徒用モード
+# =========================================================
+if mode == "生徒用":
     st.markdown("""
     <div class="hero-header">
         <h1>✨ 共通テスト演習 自動採点・統計ポータル</h1>
@@ -915,9 +1062,6 @@ if mode == "📱 生徒用（解答・採点・統計）":
             with c_id2:
                 student_id_val = st.text_input("STUDENT ID (年・組・番・号: 3101〜3645)", value=raw_student_id)
 
-            # ---------------------------------------------------------
-            # バリデーション（TEST ID 登録確認 & STUDENT ID 範囲確認）
-            # ---------------------------------------------------------
             clean_tid = str(test_id_val).strip()
             norm_tid = clean_tid.zfill(2) if clean_tid.isdigit() else clean_tid
             clean_sid = str(student_id_val).strip()
@@ -925,7 +1069,6 @@ if mode == "📱 生徒用（解答・採点・統計）":
 
             validation_errors = []
 
-            # 1. TEST ID チェック（解答が登録されているか）
             registered_tids = get_registered_test_ids()
             if not clean_tid.isdigit() or len(clean_tid) > 2:
                 validation_errors.append(
@@ -937,7 +1080,6 @@ if mode == "📱 生徒用（解答・採点・統計）":
                     f"❌ **未登録の TEST ID**: TEST ID「**{norm_tid}**」には解答が登録されていません。上の「TEST ID (2桁)」欄を手で正しい番号に修正してください。{hint_str}"
                 )
 
-            # 2. STUDENT ID チェック（3101〜3645 の範囲内か）
             if not clean_sid.isdigit() or len(clean_sid) != 4:
                 validation_errors.append(
                     f"❌ **STUDENT ID エラー**: 「{student_id_val}」は4桁の半角数字ではありません。**3101〜3645** の範囲で手で修正してください。"
@@ -982,7 +1124,6 @@ if mode == "📱 生徒用（解答・採点・統計）":
 
             st.markdown("---")
 
-            # 3. 重複データ（同じ TEST ID かつ同じ STUDENT ID）の上書き確認
             has_valid_ids = (len(validation_errors) == 0)
             is_duplicate = check_duplicate_submission(norm_tid, norm_sid) if has_valid_ids else False
             confirm_overwrite = True
@@ -1026,46 +1167,15 @@ if mode == "📱 生徒用（解答・採点・統計）":
 
                     spec_q_map = {}
                     for r in spec_rules_calc:
-                        r_type = r.get("type", "range")
-                        if r_type == "range":
-                            for q_num in range(r.get("start", 1), r.get("end", 1) + 1):
-                                spec_q_map[f'Q{q_num}'] = r
-                        elif r_type == "unordered_combo":
-                            for q_num in range(r.get("unordered_start", 1), r.get("unordered_end", 1) + 1):
-                                spec_q_map[f'Q{q_num}'] = r
-                            if r.get("extra_start", 0) > 0 and r.get("extra_end", 0) > 0:
-                                for q_num in range(r.get("extra_start", 1), r.get("extra_end", 1) + 1):
-                                    spec_q_map[f'Q{q_num}'] = r
+                        for q_num in get_rule_question_numbers(r):
+                            spec_q_map[f'Q{q_num}'] = r
 
                     rule_res = []
+                    spec_q_correctness = {}
                     for r in spec_rules_calc:
-                        r_type = r.get("type", "range")
-                        if r_type == "range":
-                            all_c = True
-                            for q_num in range(r["start"], r["end"] + 1):
-                                q = f'Q{q_num}'
-                                if final_answers.get(q) != ans_key_calc.get(q):
-                                    all_c = False
-                                    break
-                            rule_res.append({"rule": r, "is_achieved": all_c})
-                        elif r_type == "unordered_combo":
-                            u_start, u_end = r.get("unordered_start", 1), r.get("unordered_end", 1)
-                            e_start, e_end = r.get("extra_start", 0), r.get("extra_end", 0)
-                            
-                            u_user = [final_answers.get(f'Q{i}') for i in range(u_start, u_end + 1)]
-                            u_correct = [ans_key_calc.get(f'Q{i}') for i in range(u_start, u_end + 1)]
-                            
-                            u_ok = (sorted([str(x) for x in u_user]) == sorted([str(x) for x in u_correct]))
-                            
-                            e_ok = True
-                            if e_start > 0 and e_end > 0:
-                                for i in range(e_start, e_end + 1):
-                                    if final_answers.get(f'Q{i}') != ans_key_calc.get(f'Q{i}'):
-                                        e_ok = False
-                                        break
-                            
-                            all_c = u_ok and e_ok
-                            rule_res.append({"rule": r, "is_achieved": all_c})
+                        earned_pts, all_c, q_corr_map = evaluate_special_rule(r, final_answers, ans_key_calc)
+                        rule_res.append({"rule": r, "is_achieved": all_c, "earned": earned_pts})
+                        spec_q_correctness.update(q_corr_map)
 
                     t_score = 0
                     res_list = []
@@ -1082,8 +1192,13 @@ if mode == "📱 生徒用（解答・採点・統計）":
                         c_a = ans_key_calc.get(q)
                         pts = pts_key_calc.get(q, 2)
                         
-                        is_c = (u_a == c_a)
-                        sc = 0 if q in spec_q_map else (pts if is_c else 0)
+                        if q in spec_q_map:
+                            is_c = spec_q_correctness.get(q, (u_a == c_a))
+                            sc = 0
+                        else:
+                            is_c = (u_a == c_a)
+                            sc = pts if is_c else 0
+
                         status = "〇" if is_c else "✕"
 
                         t_score += sc
@@ -1093,8 +1208,7 @@ if mode == "📱 生徒用（解答・採点・統計）":
                         row_d[f'{q}_正誤'] = 1 if is_c else 0
 
                     for rr in rule_res:
-                        if rr["is_achieved"]:
-                            t_score += rr["rule"]["points"]
+                        t_score += rr["earned"]
 
                     row_d['合計点'] = int(t_score)
 
@@ -1116,17 +1230,12 @@ if mode == "📱 生徒用（解答・採点・統計）":
                             
                             for rr in rule_res:
                                 r = rr["rule"]
-                                r_type = r.get("type", "range")
-                                if r_type == "range":
-                                    r_s, r_e = r["start"], r["end"]
-                                elif r_type == "unordered_combo":
-                                    r_s = r.get("unordered_start", 1)
-                                    r_e = max(r.get("unordered_end", 1), r.get("extra_end", 0))
-                                
-                                if r_s >= s_start and r_e <= s_end:
-                                    sec_max_pts += r["points"]
-                                    if rr["is_achieved"]:
-                                        sec_score += r["points"]
+                                r_qs = get_rule_question_numbers(r)
+                                if r_qs:
+                                    r_s, r_e = min(r_qs), max(r_qs)
+                                    if r_s >= s_start and r_e <= s_end:
+                                        sec_max_pts += get_rule_max_points(r)
+                                        sec_score += rr["earned"]
 
                             sec_rate = round((sec_score / sec_max_pts * 100), 1) if sec_max_pts > 0 else 0.0
 
@@ -1300,421 +1409,11 @@ if mode == "📱 生徒用（解答・採点・統計）":
         else:
             st.warning("まだ採点データが登録されていません。")
 
-elif mode == "教員用（正解・配点・大問・特殊ルール設定）":
-    st.header("■ 教員用 各種設定ダッシュボード")
-    tab0, tab1 = st.tabs(["⚙️ システム・パスワード設定", "📝 TEST ID別 正答・配点・大問管理"])
-    
-    with tab0:
-        st.subheader("⚙️ グローバル上限設定")
-        c1, c2 = st.columns(2)
-        new_max_q = c1.number_input("システム全体の最大問題数", 1, 50, MAX_Q)
-        new_opts = c2.number_input("選択肢の数", 2, 9, NUM_OPTS)
-        if st.button("設定保存"):
-            save_json_file(CONFIG_FILE, {"max_questions": int(new_max_q), "num_options": int(new_opts)})
-            st.success("基本設定を更新しました！")
-            st.rerun()
-            
-        st.markdown("---")
-        st.subheader("🤖 Gemini API キーの設定")
-        input_gemini_key = st.text_input("Gemini API Key", value=saved_gemini_key, type="password")
-        if st.button("APIキーを保存"):
-            save_gemini_key(input_gemini_key)
-            st.success("Gemini APIキーを正常に保存しました！")
-            st.rerun()
-
-        st.markdown("---")
-        st.subheader("🔑 教員用パスワードの変更")
-        curr_pass_check = st.text_input("現在のパスワードを入力してください", type="password", key="pass_curr")
-        new_pass1 = st.text_input("新しいパスワード", type="password", key="pass_new1")
-        new_pass2 = st.text_input("新しいパスワード（確認のため再入力）", type="password", key="pass_new2")
-        
-        if st.button("パスワードを変更する", type="primary"):
-            if curr_pass_check != teacher_password:
-                st.error("現在のパスワードが正しくありません。")
-            elif not new_pass1:
-                st.error("新しいパスワードを入力してください。")
-            elif new_pass1 != new_pass2:
-                st.error("新しいパスワードが一致しません。")
-            else:
-                save_password(new_pass1)
-                st.success("教員用パスワードを正常に変更しました！")
-                st.rerun()
-
-        st.markdown("---")
-        with st.expander("🚨 新年度用：全テスト設定・全生徒成績の一括リセット（初期化）", expanded=False):
-            st.error(
-                "**【警告】この操作を実行すると、以下のデータがすべて完全に削除され、元に戻せません：**\n"
-                "- すべての TEST ID の正答・配点・大問区切り・完答ルール・テスト基本設定\n"
-                "- すべての生徒の採点結果（`test_results.csv`）\n\n"
-                "※ 教員用パスワード・グローバル上限設定・Gemini APIキーは保持されます。"
-            )
-            st.info("💡 必要な場合は、実行前に「📝 TEST ID別 正答・配点・大問管理」および「教員用（集計・Excel出力）」からCSV/Excelファイルをダウンロードしてバックアップを保存してください。")
-            
-            reset_word = st.text_input(
-                "確認のため、半角大文字で「RESET」と入力してください",
-                value="",
-                key="annual_reset_word"
-            )
-            reset_chk = st.checkbox(
-                "すべてのテスト設定と生徒成績データが完全に削除されることを理解し、一括削除します",
-                value=False,
-                key="annual_reset_chk"
-            )
-            can_reset_all = (reset_word.strip() == "RESET") and reset_chk
-            if st.button("🗑️ 新年度用に全テスト設定・全生徒成績を一括削除する", type="primary", disabled=not can_reset_all):
-                reset_all_academic_year_data()
-                st.success("✅ すべてのテスト設定と生徒成績データを一括削除しました。新年度の設定を登録できます。")
-                st.rerun()
-
-    with tab1:
-        st.subheader("📝 TEST ID 別 正答・配点・大問管理")
-        all_ans_data = load_json_file(ANSWER_KEY_FILE, {})
-        all_pts_data = load_json_file(POINTS_KEY_FILE, {})
-        existing_test_ids = sorted(list(set(list(all_ans_data.keys()) + list(all_pts_data.keys()))))
-        if not existing_test_ids: existing_test_ids = ["01"]
-
-        col_tid1, col_tid2 = st.columns([2, 2])
-        with col_tid1:
-            selected_t_id = st.selectbox("📌 編集する TEST ID を選択", existing_test_ids)
-        with col_tid2:
-            new_t_input = st.text_input("新規 TEST ID を直接入力（例: 02）", value="")
-            if new_t_input: selected_t_id = str(new_t_input).zfill(2)
-
-        target_test_id = str(selected_t_id).zfill(2)
-        t_config = load_test_config(target_test_id)
-        t_max_q = int(t_config.get("max_questions", 37))
-        t_total_score = int(t_config.get("total_score", 100))
-
-        if "prev_target_test_id" not in st.session_state or st.session_state.prev_target_test_id != target_test_id:
-            st.session_state.prev_target_test_id = target_test_id
-            loaded_ans = load_answer_key(target_test_id, t_max_q)
-            loaded_pts = load_points_key(target_test_id, t_max_q)
-            loaded_secs = load_sections_config(target_test_id)
-            sync_sections_to_session(target_test_id, loaded_secs, t_max_q)
-            st.session_state[f"cfg_max_q_{target_test_id}"] = t_max_q
-            st.session_state[f"cfg_total_sc_{target_test_id}"] = t_total_score
-            for i in range(1, 51):
-                q_k = f'Q{i}'
-                st.session_state[f"ans_{target_test_id}_{q_k}"] = loaded_ans.get(q_k, 1)
-                st.session_state[f"pts_{target_test_id}_{q_k}"] = loaded_pts.get(q_k, 2)
-
-        st.info(f"現在 **TEST ID: {target_test_id}** の正答・配点を設定・編集しています。")
-
-        with st.container(border=True):
-            st.markdown("**💾 テスト設定（正解・配点・大問・完答ルール）のCSV出力・読み込み**")
-            st.caption("設定をCSVで保存しておけば、プログラム更新（再デプロイ）後もCSVをアップロードするだけで1クリック復元できます。")
-            
-            col_io1, col_io2 = st.columns([1.2, 2])
-            with col_io1:
-                st.write("")
-                settings_csv_bytes = export_test_settings_csv(target_test_id)
-                st.download_button(
-                    label=f"📥 TEST ID [{target_test_id}] の設定をCSV出力",
-                    data=settings_csv_bytes,
-                    file_name=f"test_config_{target_test_id}.csv",
-                    mime="text/csv",
-                    use_container_width=True
-                )
-            with col_io2:
-                uploaded_cfg_csv = st.file_uploader(
-                    f"CSVから TEST ID [{target_test_id}] に設定を読み込む",
-                    type=["csv"],
-                    key=f"cfg_csv_uploader_{target_test_id}"
-                )
-                if uploaded_cfg_csv is not None:
-                    if st.button(f"📤 このCSVから TEST ID [{target_test_id}] に反映する", type="primary", use_container_width=True):
-                        ok, io_msg = import_test_settings_csv(uploaded_cfg_csv, target_test_id)
-                        if ok:
-                            st.success(io_msg)
-                            st.rerun()
-                        else:
-                            st.error(io_msg)
-        
-        with st.expander("📷 【AI機能】模範解答画像から黒塗り正答を自動解析（手動修正可）", expanded=False):
-            active_api_key = saved_gemini_key or os.environ.get("GEMINI_API_KEY", "")
-            if not active_api_key:
-                st.warning("⚠️ Gemini APIキーが未設定です。")
-                active_api_key = st.text_input("Gemini API Key を入力", type="password", key="temp_gemini_key")
-
-            master_img_file = st.file_uploader("模範解答画像を選択（JPG, PNG）", type=["jpg", "jpeg", "png"], key="master_img_uploader")
-            
-            if master_img_file is not None:
-                st.image(master_img_file, caption="アップロードした模範解答画像", width=400)
-                if st.button("🤖 この画像からAIで黒塗り正答・配点を自動抽出する ▶", type="primary"):
-                    with st.spinner("Gemini AIが黒塗り正答マスと配点を解析中..."):
-                        ext_data, msg = analyze_master_answer_sheet_ai(master_img_file, active_api_key)
-                        if ext_data:
-                            ext_max_q = int(ext_data.get("max_questions", 37))
-                            ext_total_sc = int(ext_data.get("total_score", 100))
-                            save_test_config(target_test_id, ext_max_q, ext_total_sc)
-                            st.session_state[f"cfg_max_q_{target_test_id}"] = ext_max_q
-                            st.session_state[f"cfg_total_sc_{target_test_id}"] = ext_total_sc
-                            if "sections" in ext_data:
-                                save_sections_config(target_test_id, ext_data["sections"])
-                                sync_sections_to_session(target_test_id, ext_data["sections"], ext_max_q)
-                            if "special_rules" in ext_data:
-                                save_special_rules(target_test_id, ext_data["special_rules"])
-
-                            save_answer_key(target_test_id, ext_data.get("answers", {}))
-                            save_points_key(target_test_id, ext_data.get("points", {}))
-
-                            for q_k, a_v in ext_data.get("answers", {}).items():
-                                st.session_state[f"ans_{target_test_id}_{q_k}"] = int(a_v)
-                            for q_k, p_v in ext_data.get("points", {}).items():
-                                st.session_state[f"pts_{target_test_id}_{q_k}"] = int(p_v)
-
-                            st.success(msg)
-                            st.rerun()
-                        else:
-                            st.error(msg)
-
-        st.markdown("---")
-
-        st.markdown("##### ⚙️ 1. テスト基本設定（問題数・合計点）")
-        col_cfg1, col_cfg2, col_cfg3 = st.columns([2, 2, 1])
-        new_max_q_val = col_cfg1.number_input("問題数 (1〜50)", min_value=1, max_value=50, value=t_max_q, step=1, key=f"cfg_max_q_{target_test_id}")
-        new_total_score_val = col_cfg2.number_input("合計点 (目標満点)", min_value=1, max_value=500, value=t_total_score, step=1, key=f"cfg_total_sc_{target_test_id}")
-        
-        if col_cfg3.button("基本設定を保存"):
-            save_test_config(target_test_id, new_max_q_val, new_total_score_val)
-            st.success(f"基本設定を保存しました！")
-            st.rerun()
-
-        st.markdown("---")
-        st.markdown("##### 📚 2. 大問の区切り（セクション）設定")
-        existing_sections = load_sections_config(target_test_id)
-        
-        col_sec_num, col_sec_btn = st.columns([2, 1])
-        num_sections = col_sec_num.number_input(
-            "大問の数",
-            min_value=1,
-            max_value=10,
-            value=max(len(existing_sections), 1),
-            step=1,
-            key=f"num_sec_{target_test_id}"
-        )
-        
-        new_sections_list = []
-        for sec_idx in range(int(num_sections)):
-            default_sec = existing_sections[sec_idx] if sec_idx < len(existing_sections) else {}
-            c_name, c_s, c_e = st.columns([2, 1.5, 1.5])
-            s_name = c_name.text_input(
-                f"大問{sec_idx+1} 名称",
-                value=default_sec.get("name", f"第{sec_idx+1}問"),
-                key=f"sec_name_{target_test_id}_{sec_idx}"
-            )
-            def_start = min(int(default_sec.get("start", 1)), t_max_q)
-            def_end = min(int(default_sec.get("end", min(5, t_max_q))), t_max_q)
-            
-            s_start = c_s.number_input(
-                f"開始問",
-                min_value=1,
-                max_value=t_max_q,
-                value=max(1, def_start),
-                step=1,
-                key=f"sec_start_{target_test_id}_{sec_idx}"
-            )
-            s_end = c_e.number_input(
-                f"終了問",
-                min_value=1,
-                max_value=t_max_q,
-                value=max(1, def_end),
-                step=1,
-                key=f"sec_end_{target_test_id}_{sec_idx}"
-            )
-            new_sections_list.append({"name": s_name, "start": int(s_start), "end": int(s_end)})
-
-        if st.button("大問区切り設定を保存", type="secondary"):
-            save_sections_config(target_test_id, new_sections_list)
-            sync_sections_to_session(target_test_id, new_sections_list, t_max_q)
-            st.success("大問設定を保存しました！")
-            st.rerun()
-
-        st.markdown("---")
-        st.markdown("##### 📝 3. 特殊配点（完答ルール）の設定")
-        current_rules = load_special_rules(target_test_id)
-        
-        special_q_set = set()
-        for r in current_rules:
-            r_type = r.get("type", "range")
-            if r_type == "range":
-                for q_num in range(r.get("start", 1), r.get("end", 1) + 1): special_q_set.add(q_num)
-            elif r_type == "unordered_combo":
-                for q_num in range(r.get("unordered_start", 1), r.get("unordered_end", 1) + 1): special_q_set.add(q_num)
-                if r.get("extra_start", 0) > 0 and r.get("extra_end", 0) > 0:
-                    for q_num in range(r.get("extra_start", 1), r.get("extra_end", 1) + 1): special_q_set.add(q_num)
-
-        rule_type_sel = st.radio("完答ルールのタイプ", ["通常完答 (例: 問18〜問21で4点)", "順不同＋指定問 完答"], key="rule_type_radio")
-
-        if "通常完答" in rule_type_sel:
-            col_sr1, col_sr2, col_sr3, col_sr4 = st.columns([1.5, 1.5, 1.5, 1.5])
-            s_q = col_sr1.number_input("完答 開始問", min_value=1, max_value=t_max_q, value=min(18, t_max_q), step=1, key="sr_start_q")
-            e_q = col_sr2.number_input("完答 終了問", min_value=1, max_value=t_max_q, value=min(21, t_max_q), step=1, key="sr_end_q")
-            r_pts = col_sr3.number_input("完答時 得点", min_value=1, max_value=50, value=4, step=1, key="sr_pts")
-
-            if col_sr4.button("通常ルールを追加", type="secondary"):
-                if s_q <= e_q:
-                    new_rule = {"type": "range", "start": int(s_q), "end": int(e_q), "points": int(r_pts)}
-                    if new_rule not in current_rules:
-                        current_rules.append(new_rule)
-                        save_special_rules(target_test_id, current_rules)
-                        st.success(f"ルールを追加しました！")
-                        st.rerun()
-
-        if current_rules:
-            st.write("**登録済みの特殊ルール一覧:**")
-            for idx, r in enumerate(current_rules):
-                r_type = r.get("type", "range")
-                col_list1, col_list2 = st.columns([4, 1])
-                if r_type == "range":
-                    col_list1.write(f"・ **問 {r['start']} 〜 問 {r['end']}** ： 全問正解で **{r['points']} 点**")
-                if col_list2.button("削除", key=f"del_rule_{idx}"):
-                    current_rules.pop(idx)
-                    save_special_rules(target_test_id, current_rules)
-                    st.rerun()
-
-        st.markdown("---")
-        st.markdown(f"###### ✍️ 個別配点・正答の入力・手動補正 (問1 〜 問{t_max_q})")
-
-        with st.container(border=True):
-            st.markdown("**⚡ 配点・大問・完答ルールの時短ツール**")
-            
-            copy_candidates = [tid for tid in existing_test_ids if tid != target_test_id]
-            if not copy_candidates:
-                copy_candidates = existing_test_ids
-
-            col_cp1, col_cp2 = st.columns([1.8, 2.2])
-            with col_cp1:
-                src_test_id = st.selectbox(
-                    "コピー元の TEST ID を選択",
-                    options=copy_candidates,
-                    key=f"copy_src_{target_test_id}"
-                )
-            with col_cp2:
-                st.write("")
-                st.write("")
-                if st.button("📋 この TEST ID から配点・大問・完答ルールをコピー", key=f"btn_copy_pts_{target_test_id}", use_container_width=True):
-                    # 1. 基本設定（問題数・目標満点）のコピーと保存
-                    src_cfg = load_test_config(src_test_id)
-                    copied_max_q = int(src_cfg.get("max_questions", t_max_q))
-                    copied_total_sc = int(src_cfg.get("total_score", t_total_score))
-                    save_test_config(target_test_id, copied_max_q, copied_total_sc)
-                    st.session_state[f"cfg_max_q_{target_test_id}"] = copied_max_q
-                    st.session_state[f"cfg_total_sc_{target_test_id}"] = copied_total_sc
-
-                    # 2. 大問の区切り（セクション）のコピーと保存（セッションにも即時同期）
-                    src_sections = load_sections_config(src_test_id)
-                    copied_sections = [dict(s) for s in src_sections]
-                    save_sections_config(target_test_id, copied_sections)
-                    sync_sections_to_session(target_test_id, copied_sections, copied_max_q)
-
-                    # 3. 特殊配点（完答ルール）のコピーと保存
-                    src_rules = load_special_rules(src_test_id)
-                    save_special_rules(target_test_id, [dict(r) for r in src_rules])
-
-                    # 4. 個別配点のコピー（セッション＆保存）
-                    src_pts_dict = load_points_key(src_test_id, copied_max_q)
-                    copied_pts_to_save = {}
-                    for i in range(1, copied_max_q + 1):
-                        q_k = f'Q{i}'
-                        pt_val = int(src_pts_dict.get(q_k, 2))
-                        st.session_state[f"pts_{target_test_id}_{q_k}"] = pt_val
-                        copied_pts_to_save[q_k] = pt_val
-                    save_points_key(target_test_id, copied_pts_to_save)
-
-                    st.success(f"TEST ID [{src_test_id}] から配点・基本設定・大問区切り・完答ルールをコピーしました！")
-                    st.rerun()
-
-            st.markdown("---")
-
-            col_bk1, col_bk2, col_bk3, col_bk4 = st.columns([1, 1, 1, 1.5])
-            with col_bk1:
-                bulk_start = st.number_input("開始問", min_value=1, max_value=t_max_q, value=1, step=1, key=f"bulk_s_{target_test_id}")
-            with col_bk2:
-                bulk_end = st.number_input("終了問", min_value=1, max_value=t_max_q, value=t_max_q, step=1, key=f"bulk_e_{target_test_id}")
-            with col_bk3:
-                bulk_pts = st.number_input("配点 (点)", min_value=0, max_value=50, value=2, step=1, key=f"bulk_p_{target_test_id}")
-            with col_bk4:
-                st.write("")
-                st.write("")
-                if st.button("🔢 まとめて配点を設定", key=f"btn_bulk_pts_{target_test_id}", use_container_width=True):
-                    if bulk_start > bulk_end:
-                        st.error("開始問は終了問以下にしてください。")
-                    else:
-                        for i in range(int(bulk_start), int(bulk_end) + 1):
-                            if i not in special_q_set:
-                                q_k = f'Q{i}'
-                                st.session_state[f"pts_{target_test_id}_{q_k}"] = int(bulk_pts)
-                        st.success(f"問{bulk_start}〜問{bulk_end}を {bulk_pts}点 に設定しました！（最後に下の「一括保存」を押してください）")
-                        st.rerun()
-        
-        current_answers = load_answer_key(target_test_id, t_max_q)
-        current_points = load_points_key(target_test_id, t_max_q)
-        options = list(range(0, NUM_OPTS + 1))
-        new_answers = {}
-        new_points = {}
-
-        col_a_l, col_a_r = st.columns(2)
-        with col_a_l:
-            st.markdown("###### ◀ 問 1 〜 25")
-            for i in range(1, min(26, t_max_q + 1)):
-                q_k = f'Q{i}'
-                curr_ans_val = int(st.session_state.get(f"ans_{target_test_id}_{q_k}", current_answers.get(q_k, 1)))
-                idx = options.index(curr_ans_val) if curr_ans_val in options else 0
-                
-                q_c1, q_c2, q_c3 = st.columns([1, 2, 2])
-                q_c1.write(f"**問 {i}**")
-                new_answers[q_k] = q_c2.selectbox(f"正答_問{i}", options=options, index=idx, key=f"ans_{target_test_id}_{q_k}", label_visibility="collapsed")
-                
-                if i in special_q_set:
-                    q_c3.caption("🔒 完答ルール対象")
-                    new_points[q_k] = 0
-                else:
-                    init_pt = int(st.session_state.get(f"pts_{target_test_id}_{q_k}", current_points.get(q_k, 2)))
-                    new_points[q_k] = q_c3.number_input(f"配点_問{i}", min_value=0, max_value=50, value=init_pt, step=1, key=f"pts_{target_test_id}_{q_k}", label_visibility="collapsed")
-
-        with col_a_r:
-            if t_max_q >= 26:
-                st.markdown(f"###### ▶ 問 26 〜 {t_max_q}")
-                for i in range(26, t_max_q + 1):
-                    q_k = f'Q{i}'
-                    curr_ans_val = int(st.session_state.get(f"ans_{target_test_id}_{q_k}", current_answers.get(q_k, 1)))
-                    idx = options.index(curr_ans_val) if curr_ans_val in options else 0
-                    
-                    q_c1, q_c2, q_c3 = st.columns([1, 2, 2])
-                    q_c1.write(f"**問 {i}**")
-                    new_answers[q_k] = q_c2.selectbox(f"正答_問{i}", options=options, index=idx, key=f"ans_{target_test_id}_{q_k}", label_visibility="collapsed")
-                    
-                    if i in special_q_set:
-                        q_c3.caption("🔒 完答ルール対象")
-                        new_points[q_k] = 0
-                    else:
-                        init_pt = int(st.session_state.get(f"pts_{target_test_id}_{q_k}", current_points.get(q_k, 2)))
-                        new_points[q_k] = q_c3.number_input(f"配点_問{i}", min_value=0, max_value=50, value=init_pt, step=1, key=f"pts_{target_test_id}_{q_k}", label_visibility="collapsed")
-
-        calculated_total = sum(new_points.values()) + sum(r["points"] for r in current_rules)
-
-        st.markdown("---")
-        if calculated_total != t_total_score:
-            st.warning(f"⚠️ **配点合計の不一致**: 現在設定されている配点合計は **{calculated_total} 点** です。（目標満点: **{t_total_score} 点**）")
-        else:
-            st.success(f"✅ **配点合計チェックOK**: 設定されている配点合計は **{calculated_total} 点** です。")
-
-        if st.button(f"TEST ID [{target_test_id}] の設定を一括保存する", type="primary", use_container_width=True):
-            if calculated_total != t_total_score:
-                st.error(f"❌ 配点の合計が目標満点と一致していません。")
-            else:
-                save_answer_key(target_test_id, new_answers)
-                save_points_key(target_test_id, new_points)
-                save_test_config(target_test_id, t_max_q, t_total_score)
-                save_sections_config(target_test_id, new_sections_list)
-                sync_sections_to_session(target_test_id, new_sections_list, t_max_q)
-                save_special_rules(target_test_id, current_rules)
-                st.success(f"設定を正常に保存しました！")
-                st.rerun()
-
-elif mode == "教員用（集計・Excel出力）":
-    st.header("■ 教員用 集計ダッシュボード")
+# =========================================================
+# 2. 教員用モード（集計・Excel出力）
+# =========================================================
+elif mode == "教員用":
+    st.header("■ 教員用 集計・Excel出力ダッシュボード")
 
     with st.expander("📥 生徒の成績データ（CSV / Excel）をインポート（読み込み・復元）", expanded=False):
         st.caption("以前この画面から出力したCSVまたはExcelファイルをアップロードすると、生徒の採点データを一括復元・追加できます。")
@@ -1767,9 +1466,6 @@ elif mode == "教員用（集計・Excel出力）":
         m3.metric("最高点", f"{max_score} 点 / {ref_total_score} 点")
         m4.metric("最低点", f"{int(df_display['合計点'].min())} 点" if not df_display.empty and not pd.isna(df_display['合計点'].min()) else "0 点")
 
-        # ---------------------------------------------------------
-        # クラス別平均点セクション（STUDENT ID 左2桁 31〜36）
-        # ---------------------------------------------------------
         st.markdown("---")
         st.subheader("1. クラス別平均点（STUDENT ID 左2桁: 31〜36）")
         if 'STUDENT ID' in df_display.columns and not df_display.empty:
@@ -1813,9 +1509,6 @@ elif mode == "教員用（集計・Excel出力）":
 
             st.dataframe(pd.DataFrame(class_rows), use_container_width=True, hide_index=True)
 
-        # ---------------------------------------------------------
-        # 個人別解答・得点一覧（STUDENT ID の隣に 合計点 を配置）
-        # ---------------------------------------------------------
         st.markdown("---")
         st.subheader("2. 個人別解答・得点一覧")
 
@@ -1896,26 +1589,551 @@ elif mode == "教員用（集計・Excel出力）":
                 delete_rows_from_csv(orig_indices_to_remove)
                 st.success(f"{num_selected} 件のデータを削除しました。")
                 st.rerun()
-
-        st.markdown("---")
-        with st.expander(f"⚠️ 危険な操作：TEST ID [{selected_test_id}] の生徒採点データをすべて一括削除", expanded=False):
-            st.warning(
-                f"**TEST ID [{selected_test_id}]** に保存されている生徒の全採点結果（**{len(df_display)} 件**）をすべて削除します。\n"
-                "※ 他の TEST ID の成績データや、正答・配点の設定自体は消えずに残ります。削除後は元に戻せません。"
-            )
-            confirm_tid_del = st.checkbox(
-                f"TEST ID [{selected_test_id}] の全採点結果（{len(df_display)} 件）を削除することに同意します",
-                value=False,
-                key=f"chk_del_all_{selected_test_id}"
-            )
-            if st.button(
-                f"🗑️ TEST ID [{selected_test_id}] の全採点結果をすべて削除する",
-                type="primary",
-                disabled=not confirm_tid_del,
-                key=f"btn_del_all_{selected_test_id}"
-            ):
-                del_cnt = delete_all_results_by_test_id(selected_test_id)
-                st.success(f"✅ TEST ID [{selected_test_id}] の生徒採点結果（{del_cnt} 件）をすべて削除しました。")
-                st.rerun()
     else:
         st.info("まだ採点データがありません。生徒がマークシートを提出するか、上の「📥 生徒の成績データをインポート」から過去のCSV/Excelファイルを読み込んでください。")
+
+# =========================================================
+# 3. 管理者用モード（基本設定・正答・配点・危険な操作）
+# =========================================================
+elif mode == "管理者用":
+    st.header("■ 管理者用 各種設定ダッシュボード")
+    tab1, tab0 = st.tabs(["📝 TEST ID別 正答・配点・大問管理", "⚙️ システム・パスワード・データ削除設定"])
+    
+    with tab0:
+        st.subheader("⚙️ グローバル上限設定")
+        c1, c2 = st.columns(2)
+        new_max_q = c1.number_input("システム全体の最大問題数", 1, 50, MAX_Q)
+        new_opts = c2.number_input("選択肢の数", 2, 9, NUM_OPTS)
+        if st.button("基本設定を保存", key="btn_save_global_cfg"):
+            save_json_file(CONFIG_FILE, {"max_questions": int(new_max_q), "num_options": int(new_opts)})
+            st.success("基本設定を更新しました！")
+            st.rerun()
+            
+        st.markdown("---")
+        st.subheader("🤖 Gemini API キーの設定")
+        input_gemini_key = st.text_input("Gemini API Key", value=saved_gemini_key, type="password")
+        if st.button("APIキーを保存"):
+            save_gemini_key(input_gemini_key)
+            st.success("Gemini APIキーを正常に保存しました！")
+            st.rerun()
+
+        st.markdown("---")
+        st.subheader("🔑 パスワードの変更（教員用・管理者用共通）")
+        st.caption("「教員用」および「管理者用」モードに入るための共通パスワードです。")
+        curr_pass_check = st.text_input("現在のパスワードを入力してください", type="password", key="pass_curr")
+        new_pass1 = st.text_input("新しいパスワード", type="password", key="pass_new1")
+        new_pass2 = st.text_input("新しいパスワード（確認のため再入力）", type="password", key="pass_new2")
+        
+        if st.button("パスワードを変更する", type="primary"):
+            if curr_pass_check != shared_password:
+                st.error("現在のパスワードが正しくありません。")
+            elif not new_pass1:
+                st.error("新しいパスワードを入力してください。")
+            elif new_pass1 != new_pass2:
+                st.error("新しいパスワードが一致しません。")
+            else:
+                save_password(new_pass1)
+                st.success("パスワードを正常に変更しました！")
+                st.rerun()
+
+        st.markdown("---")
+        st.subheader("🚨 危険な操作（データ削除・初期化）")
+        st.caption("誤操作によるデータ消失を防ぐため、成績の一括削除および年度初期化は管理者用画面に集約されています。")
+
+        with st.expander("⚠️ 危険な操作①：指定した TEST ID の生徒採点データをすべて一括削除", expanded=False):
+            df_admin_check = safe_read_csv(DATA_FILE)
+            admin_tids = get_clean_unique_test_ids(df_admin_check)
+            if admin_tids:
+                df_admin_check['TEST ID'] = df_admin_check['TEST ID'].astype(str).str.strip().str.replace(r'\.0$', '', regex=True).str.zfill(2)
+                del_target_tid = st.selectbox("削除対象の TEST ID を選択", admin_tids, key="admin_del_target_tid")
+                target_cnt = int((df_admin_check['TEST ID'] == del_target_tid).sum())
+                st.warning(
+                    f"**TEST ID [{del_target_tid}]** に保存されている生徒の全採点結果（**{target_cnt} 件**）をすべて削除します。\n"
+                    "※ 他の TEST ID の成績データや、正答・配点の設定自体は消えずに残ります。削除後は元に戻せません。"
+                )
+                confirm_tid_del = st.checkbox(
+                    f"TEST ID [{del_target_tid}] の全採点結果（{target_cnt} 件）を削除することに同意します",
+                    value=False,
+                    key=f"chk_del_all_{del_target_tid}"
+                )
+                if st.button(
+                    f"🗑️ TEST ID [{del_target_tid}] の全採点結果をすべて削除する",
+                    type="primary",
+                    disabled=not confirm_tid_del,
+                    key=f"btn_del_all_{del_target_tid}"
+                ):
+                    del_cnt = delete_all_results_by_test_id(del_target_tid)
+                    st.success(f"✅ TEST ID [{del_target_tid}] の生徒採点結果（{del_cnt} 件）をすべて削除しました。")
+                    st.rerun()
+            else:
+                st.info("現在削除可能な生徒採点データはありません。")
+
+        with st.expander("🚨 危険な操作②：新年度用 全テスト設定・全生徒成績の一括リセット（初期化）", expanded=False):
+            st.error(
+                "**【警告】この操作を実行すると、以下のデータがすべて完全に削除され、元に戻せません：**\n"
+                "- すべての TEST ID の正答・配点・大問区切り・完答ルール・テスト基本設定\n"
+                "- すべての生徒の採点結果（`test_results.csv`）\n\n"
+                "※ パスワード・グローバル上限設定・Gemini APIキーは保持されます。"
+            )
+            st.info("💡 必要な場合は、実行前に「📝 TEST ID別 正答・配点・大問管理」および「教員用」画面からCSV/Excelファイルをダウンロードしてバックアップを保存してください。")
+            
+            reset_word = st.text_input(
+                "確認のため、半角大文字で「RESET」と入力してください",
+                value="",
+                key="annual_reset_word"
+            )
+            reset_chk = st.checkbox(
+                "すべてのテスト設定と生徒成績データが完全に削除されることを理解し、一括削除します",
+                value=False,
+                key="annual_reset_chk"
+            )
+            can_reset_all = (reset_word.strip() == "RESET") and reset_chk
+            if st.button("🗑️ 新年度用に全テスト設定・全生徒成績を一括削除する", type="primary", disabled=not can_reset_all):
+                reset_all_academic_year_data()
+                st.success("✅ すべてのテスト設定と生徒成績データを一括削除しました。新年度の設定を登録できます。")
+                st.rerun()
+
+    with tab1:
+        st.subheader("📝 TEST ID 別 正答・配点・大問管理")
+        all_ans_data = load_json_file(ANSWER_KEY_FILE, {})
+        all_pts_data = load_json_file(POINTS_KEY_FILE, {})
+        existing_test_ids = sorted(list(set(list(all_ans_data.keys()) + list(all_pts_data.keys()))))
+        if not existing_test_ids: existing_test_ids = ["01"]
+
+        col_tid1, col_tid2 = st.columns([2, 2])
+        with col_tid1:
+            selected_t_id = st.selectbox("📌 編集する TEST ID を選択", existing_test_ids)
+        with col_tid2:
+            new_t_input = st.text_input("新規 TEST ID を直接入力（例: 02）", value="")
+            if new_t_input: selected_t_id = str(new_t_input).zfill(2)
+
+        target_test_id = str(selected_t_id).zfill(2)
+        t_config = load_test_config(target_test_id)
+        t_max_q = int(t_config.get("max_questions", 37))
+        t_total_score = int(t_config.get("total_score", 100))
+
+        # ★重要：ウィジェットを描画する「前」にのみ session_state を同期する（StreamlitAPIException防止）
+        force_reload = st.session_state.pop(f"force_reload_{target_test_id}", False)
+        if force_reload or "prev_target_test_id" not in st.session_state or st.session_state.prev_target_test_id != target_test_id:
+            st.session_state.prev_target_test_id = target_test_id
+            loaded_ans = load_answer_key(target_test_id, t_max_q)
+            loaded_pts = load_points_key(target_test_id, t_max_q)
+            loaded_secs = load_sections_config(target_test_id)
+            sync_sections_to_session(target_test_id, loaded_secs, t_max_q)
+            st.session_state[f"cfg_max_q_{target_test_id}"] = t_max_q
+            st.session_state[f"cfg_total_sc_{target_test_id}"] = t_total_score
+            for i in range(1, 51):
+                q_k = f'Q{i}'
+                st.session_state[f"ans_{target_test_id}_{q_k}"] = loaded_ans.get(q_k, 1)
+                st.session_state[f"pts_{target_test_id}_{q_k}"] = loaded_pts.get(q_k, 2)
+
+        st.info(f"現在 **TEST ID: {target_test_id}** の正答・配点を設定・編集しています。")
+
+        with st.container(border=True):
+            st.markdown("**💾 テスト設定（正解・配点・大問・完答ルール）のCSV出力・読み込み**")
+            st.caption("設定をCSVで保存しておけば、プログラム更新（再デプロイ）後もCSVをアップロードするだけで1クリック復元できます。")
+            
+            col_io1, col_io2 = st.columns([1.2, 2])
+            with col_io1:
+                st.write("")
+                settings_csv_bytes = export_test_settings_csv(target_test_id)
+                st.download_button(
+                    label=f"📥 TEST ID [{target_test_id}] の設定をCSV出力",
+                    data=settings_csv_bytes,
+                    file_name=f"test_config_{target_test_id}.csv",
+                    mime="text/csv",
+                    use_container_width=True
+                )
+            with col_io2:
+                uploaded_cfg_csv = st.file_uploader(
+                    f"CSVから TEST ID [{target_test_id}] に設定を読み込む",
+                    type=["csv"],
+                    key=f"cfg_csv_uploader_{target_test_id}"
+                )
+                if uploaded_cfg_csv is not None:
+                    if st.button(f"📤 このCSVから TEST ID [{target_test_id}] に反映する", type="primary", use_container_width=True):
+                        ok, io_msg = import_test_settings_csv(uploaded_cfg_csv, target_test_id)
+                        if ok:
+                            st.success(io_msg)
+                            st.rerun()
+                        else:
+                            st.error(io_msg)
+        
+        with st.expander("📷 【AI機能】解答例の画像から「正答」のみを自動抽出して入力欄に反映", expanded=False):
+            st.caption("マーク黒塗り型（REACH・プレノート等）や、正解番号記載型（過去問集の解答・採点表等）の画像をアップロードすると、配点や大問設定はそのまま保持した状態で「正答」だけを入力欄に反映します。")
+            active_api_key = saved_gemini_key or os.environ.get("GEMINI_API_KEY", "")
+            if not active_api_key:
+                st.warning("⚠️ Gemini APIキーが未設定です。「⚙️ システム・パスワード・データ削除設定」タブで保存してください。")
+                active_api_key = st.text_input("Gemini API Key を一時入力", type="password", key="temp_gemini_key")
+
+            master_img_file = st.file_uploader("解答例の画像を選択（JPG, PNG）", type=["jpg", "jpeg", "png"], key=f"master_img_uploader_{target_test_id}")
+            
+            if master_img_file is not None:
+                st.image(master_img_file, caption="アップロードした解答例画像", width=400)
+                if st.button("🤖 この画像から「正答」のみを自動抽出して下の欄に入れる ▶", type="primary", key=f"btn_ai_ans_{target_test_id}"):
+                    with st.spinner("Gemini AIが解答画像から正答番号を読み取り中..."):
+                        ext_data, msg = analyze_master_answer_sheet_ai(master_img_file, active_api_key, max_q_limit=t_max_q)
+                        if ext_data and "answers" in ext_data:
+                            extracted_ans = ext_data["answers"]
+                            for i in range(1, t_max_q + 1):
+                                q_k = f"Q{i}"
+                                if q_k in extracted_ans:
+                                    val = int(extracted_ans[q_k])
+                                    if 0 <= val <= NUM_OPTS:
+                                        st.session_state[f"ans_{target_test_id}_{q_k}"] = val
+
+                            st.session_state[f"ai_ans_notice_{target_test_id}"] = msg
+                            st.rerun()
+                        else:
+                            st.error(msg)
+
+            if f"ai_ans_notice_{target_test_id}" in st.session_state:
+                st.success(st.session_state.pop(f"ai_ans_notice_{target_test_id}"))
+
+        st.markdown("---")
+
+        st.markdown("##### ⚙️ 1. テスト基本設定（問題数・合計点）")
+        col_cfg1, col_cfg2, col_cfg3 = st.columns([2, 2, 1])
+        new_max_q_val = col_cfg1.number_input("問題数 (1〜50)", min_value=1, max_value=50, value=t_max_q, step=1, key=f"cfg_max_q_{target_test_id}")
+        new_total_score_val = col_cfg2.number_input("合計点 (目標満点)", min_value=1, max_value=500, value=t_total_score, step=1, key=f"cfg_total_sc_{target_test_id}")
+        
+        if col_cfg3.button("基本設定を保存"):
+            save_test_config(target_test_id, new_max_q_val, new_total_score_val)
+            st.session_state[f"force_reload_{target_test_id}"] = True
+            st.success("基本設定を保存しました！")
+            st.rerun()
+
+        st.markdown("---")
+        st.markdown("##### 📚 2. 大問の区切り（セクション）設定")
+        existing_sections = load_sections_config(target_test_id)
+        
+        k_num_sec = f"num_sec_{target_test_id}"
+        def_num_sec = clamp_session_int(k_num_sec, 1, 10, max(len(existing_sections), 1))
+
+        col_sec_num, _ = st.columns([2, 1])
+        num_sections = col_sec_num.number_input(
+            "大問の数",
+            min_value=1,
+            max_value=10,
+            value=def_num_sec,
+            step=1,
+            key=k_num_sec
+        )
+        
+        new_sections_list = []
+        for sec_idx in range(int(num_sections)):
+            default_sec = existing_sections[sec_idx] if sec_idx < len(existing_sections) else {}
+            c_name, c_s, c_e = st.columns([2, 1.5, 1.5])
+            s_name = c_name.text_input(
+                f"大問{sec_idx+1} 名称",
+                value=default_sec.get("name", f"第{sec_idx+1}問"),
+                key=f"sec_name_{target_test_id}_{sec_idx}"
+            )
+            k_sec_s = f"sec_start_{target_test_id}_{sec_idx}"
+            k_sec_e = f"sec_end_{target_test_id}_{sec_idx}"
+            def_start = clamp_session_int(k_sec_s, 1, t_max_q, default_sec.get("start", 1))
+            def_end = clamp_session_int(k_sec_e, 1, t_max_q, default_sec.get("end", min(5, t_max_q)))
+            
+            s_start = c_s.number_input(
+                "開始問",
+                min_value=1,
+                max_value=t_max_q,
+                value=def_start,
+                step=1,
+                key=k_sec_s
+            )
+            s_end = c_e.number_input(
+                "終了問",
+                min_value=1,
+                max_value=t_max_q,
+                value=def_end,
+                step=1,
+                key=k_sec_e
+            )
+            new_sections_list.append({"name": s_name, "start": int(s_start), "end": int(s_end)})
+
+        if st.button("大問区切り設定を保存", type="secondary"):
+            save_sections_config(target_test_id, new_sections_list)
+            st.session_state[f"force_reload_{target_test_id}"] = True
+            st.success("大問設定を保存しました！")
+            st.rerun()
+
+        st.markdown("---")
+        st.markdown("##### 📝 3. 特殊配点（完答・順不同ルール）の設定")
+        current_rules = load_special_rules(target_test_id)
+        
+        special_q_set = set()
+        for r in current_rules:
+            for q_num in get_rule_question_numbers(r):
+                special_q_set.add(q_num)
+
+        rule_type_sel = st.radio(
+            "特殊配点ルールのタイプ",
+            [
+                "通常完答 (例: 問18〜問21で4点)",
+                "順不同のみ (例: 問22〜問23が順不同で部分点または完答)",
+                "順不同＋完答 (例: 問37〜38順不同 ＋ 問39も全問正解で完答)"
+            ],
+            key=f"rule_type_radio_{target_test_id}"
+        )
+
+        if "通常完答" in rule_type_sel:
+            k_sr_s = f"sr_start_q_{target_test_id}"
+            k_sr_e = f"sr_end_q_{target_test_id}"
+            def_sr_s = clamp_session_int(k_sr_s, 1, t_max_q, min(18, t_max_q))
+            def_sr_e = clamp_session_int(k_sr_e, 1, t_max_q, min(21, t_max_q))
+
+            col_sr1, col_sr2, col_sr3, col_sr4 = st.columns([1.5, 1.5, 1.5, 1.5])
+            s_q = col_sr1.number_input("完答 開始問", min_value=1, max_value=t_max_q, value=def_sr_s, step=1, key=k_sr_s)
+            e_q = col_sr2.number_input("完答 終了問", min_value=1, max_value=t_max_q, value=def_sr_e, step=1, key=k_sr_e)
+            r_pts = col_sr3.number_input("完答時 得点", min_value=1, max_value=50, value=4, step=1, key=f"sr_pts_{target_test_id}")
+
+            st.write("")
+            if col_sr4.button("通常完答ルールを追加", type="secondary", key=f"btn_add_sr_{target_test_id}"):
+                if s_q > e_q:
+                    st.error("開始問は終了問以下にしてください。")
+                else:
+                    new_rule = {"type": "range", "start": int(s_q), "end": int(e_q), "points": int(r_pts)}
+                    if new_rule not in current_rules:
+                        current_rules.append(new_rule)
+                        save_special_rules(target_test_id, current_rules)
+                        st.success("通常完答ルールを追加しました！")
+                        st.rerun()
+
+        elif "順不同のみ" in rule_type_sel:
+            k_uo_s = f"uo_start_q_{target_test_id}"
+            k_uo_e = f"uo_end_q_{target_test_id}"
+            def_uo_s = clamp_session_int(k_uo_s, 1, t_max_q, min(22, t_max_q))
+            def_uo_e = clamp_session_int(k_uo_e, 1, t_max_q, min(23, t_max_q))
+
+            col_uo1, col_uo2, col_uo3, col_uo4 = st.columns([1.3, 1.3, 1.8, 1.6])
+            uo_s = col_uo1.number_input("順不同 開始問", min_value=1, max_value=t_max_q, value=def_uo_s, step=1, key=k_uo_s)
+            uo_e = col_uo2.number_input("順不同 終了問", min_value=1, max_value=t_max_q, value=def_uo_e, step=1, key=k_uo_e)
+            uo_mode = col_uo3.selectbox(
+                "採点方式",
+                ["1問正解ごとに得点（部分点あり）", "全問正解で得点（完答）"],
+                key=f"uo_scoring_mode_{target_test_id}"
+            )
+            is_uo_partial = ("部分点あり" in uo_mode)
+            pts_label = "1問あたりの得点" if is_uo_partial else "全問正解時の得点"
+            uo_pts = col_uo4.number_input(pts_label, min_value=1, max_value=50, value=4, step=1, key=f"uo_pts_{target_test_id}")
+
+            if st.button("順不同ルールを追加", type="secondary", key=f"btn_add_uo_only_{target_test_id}"):
+                if uo_s >= uo_e:
+                    st.error("順不同は2問以上の範囲（開始問 < 終了問）を指定してください。")
+                else:
+                    new_rule = {
+                        "type": "unordered_only",
+                        "start": int(uo_s),
+                        "end": int(uo_e),
+                        "points": int(uo_pts),
+                        "partial": is_uo_partial
+                    }
+                    if new_rule not in current_rules:
+                        current_rules.append(new_rule)
+                        save_special_rules(target_test_id, current_rules)
+                        st.success("順不同ルールを追加しました！")
+                        st.rerun()
+
+        elif "順不同＋完答" in rule_type_sel:
+            k_uc_us = f"uc_u_start_{target_test_id}"
+            k_uc_ue = f"uc_u_end_{target_test_id}"
+            def_uc_us = clamp_session_int(k_uc_us, 1, t_max_q, max(1, min(37, t_max_q - 1)))
+            def_uc_ue = clamp_session_int(k_uc_ue, 1, t_max_q, min(38, t_max_q))
+
+            col_uc1, col_uc2, col_uc3, col_uc4 = st.columns([1.3, 1.3, 1.8, 1.4])
+            uc_us = col_uc1.number_input("順不同 開始問", min_value=1, max_value=t_max_q, value=def_uc_us, step=1, key=k_uc_us)
+            uc_ue = col_uc2.number_input("順不同 終了問", min_value=1, max_value=t_max_q, value=def_uc_ue, step=1, key=k_uc_ue)
+            extra_mode = col_uc3.selectbox(
+                "追加で完答に含める設問",
+                ["なし（順不同のみで完答）", "1問追加（例: 問39）", "範囲で追加（例: 問39〜40）"],
+                key=f"uc_extra_mode_{target_test_id}"
+            )
+            uc_pts = col_uc4.number_input("完答時 得点", min_value=1, max_value=50, value=4, step=1, key=f"uc_pts_{target_test_id}")
+
+            uc_es, uc_ee = 0, 0
+            if extra_mode == "1問追加（例: 問39）":
+                k_uc_single = f"uc_e_single_{target_test_id}"
+                def_single = clamp_session_int(k_uc_single, 1, t_max_q, min(uc_ue + 1, t_max_q))
+                single_q = st.number_input("追加する設問番号", min_value=1, max_value=t_max_q, value=def_single, step=1, key=k_uc_single)
+                uc_es, uc_ee = int(single_q), int(single_q)
+            elif extra_mode == "範囲で追加（例: 問39〜40）":
+                col_ex1, col_ex2 = st.columns(2)
+                k_uc_es = f"uc_e_start_{target_test_id}"
+                k_uc_ee = f"uc_e_end_{target_test_id}"
+                def_es = clamp_session_int(k_uc_es, 1, t_max_q, min(uc_ue + 1, t_max_q))
+                def_ee = clamp_session_int(k_uc_ee, 1, t_max_q, min(uc_ue + 2, t_max_q))
+                uc_es = int(col_ex1.number_input("追加指定 開始問", min_value=1, max_value=t_max_q, value=def_es, step=1, key=k_uc_es))
+                uc_ee = int(col_ex2.number_input("追加指定 終了問", min_value=1, max_value=t_max_q, value=def_ee, step=1, key=k_uc_ee))
+
+            if st.button("順不同＋完答ルールを追加", type="secondary", key=f"btn_add_uc_{target_test_id}"):
+                if uc_us >= uc_ue:
+                    st.error("順不同範囲は「開始問 < 終了問」（2問以上）にしてください。")
+                elif extra_mode != "なし（順不同のみで完答）" and uc_es > uc_ee:
+                    st.error("追加指定範囲は「開始問 <= 終了問」にしてください。")
+                elif extra_mode != "なし（順不同のみで完答）" and (uc_us <= uc_ee and uc_es <= uc_ue):
+                    st.error("順不同の範囲と追加指定の設問が重複しています。別の設問番号を指定してください。")
+                else:
+                    new_rule = {
+                        "type": "unordered_combo",
+                        "unordered_start": int(uc_us),
+                        "unordered_end": int(uc_ue),
+                        "extra_start": int(uc_es),
+                        "extra_end": int(uc_ee),
+                        "points": int(uc_pts)
+                    }
+                    if new_rule not in current_rules:
+                        current_rules.append(new_rule)
+                        save_special_rules(target_test_id, current_rules)
+                        st.success("順不同＋完答ルールを追加しました！")
+                        st.rerun()
+                    else:
+                        st.info("同じルールが既に登録されています。")
+
+        if current_rules:
+            st.write("**登録済みの特殊ルール一覧:**")
+            for idx, r in enumerate(current_rules):
+                col_list1, col_list2 = st.columns([4, 1])
+                col_list1.write(format_special_rule_label(r))
+                if col_list2.button("削除", key=f"del_rule_{target_test_id}_{idx}"):
+                    current_rules.pop(idx)
+                    save_special_rules(target_test_id, current_rules)
+                    st.rerun()
+
+        st.markdown("---")
+        st.markdown(f"###### ✍️ 個別配点・正答の入力・手動補正 (問1 〜 問{t_max_q})")
+
+        with st.container(border=True):
+            st.markdown("**⚡ 配点・大問・完答ルールの時短ツール**")
+            
+            copy_candidates = [tid for tid in existing_test_ids if tid != target_test_id]
+            if not copy_candidates:
+                copy_candidates = existing_test_ids
+
+            col_cp1, col_cp2 = st.columns([1.8, 2.2])
+            with col_cp1:
+                src_test_id = st.selectbox(
+                    "コピー元の TEST ID を選択",
+                    options=copy_candidates,
+                    key=f"copy_src_{target_test_id}"
+                )
+            with col_cp2:
+                st.write("")
+                st.write("")
+                if st.button("📋 この TEST ID から配点・大問・完答ルールをコピー", key=f"btn_copy_pts_{target_test_id}", use_container_width=True):
+                    src_cfg = load_test_config(src_test_id)
+                    copied_max_q = int(src_cfg.get("max_questions", t_max_q))
+                    copied_total_sc = int(src_cfg.get("total_score", t_total_score))
+                    save_test_config(target_test_id, copied_max_q, copied_total_sc)
+
+                    src_sections = load_sections_config(src_test_id)
+                    copied_sections = [dict(s) for s in src_sections]
+                    save_sections_config(target_test_id, copied_sections)
+
+                    src_rules = load_special_rules(src_test_id)
+                    save_special_rules(target_test_id, [dict(r) for r in src_rules])
+
+                    src_pts_dict = load_points_key(src_test_id, copied_max_q)
+                    copied_pts_to_save = {}
+                    for i in range(1, copied_max_q + 1):
+                        q_k = f'Q{i}'
+                        pt_val = int(src_pts_dict.get(q_k, 2))
+                        copied_pts_to_save[q_k] = pt_val
+                    save_points_key(target_test_id, copied_pts_to_save)
+
+                    st.session_state[f"force_reload_{target_test_id}"] = True
+                    st.success(f"TEST ID [{src_test_id}] から配点・基本設定・大問区切り・完答ルールをコピーしました！")
+                    st.rerun()
+
+            st.markdown("---")
+
+            k_bk_s = f"bulk_s_{target_test_id}"
+            k_bk_e = f"bulk_e_{target_test_id}"
+            def_bk_s = clamp_session_int(k_bk_s, 1, t_max_q, 1)
+            def_bk_e = clamp_session_int(k_bk_e, 1, t_max_q, t_max_q)
+
+            col_bk1, col_bk2, col_bk3, col_bk4 = st.columns([1, 1, 1, 1.5])
+            with col_bk1:
+                bulk_start = st.number_input("開始問", min_value=1, max_value=t_max_q, value=def_bk_s, step=1, key=k_bk_s)
+            with col_bk2:
+                bulk_end = st.number_input("終了問", min_value=1, max_value=t_max_q, value=def_bk_e, step=1, key=k_bk_e)
+            with col_bk3:
+                bulk_pts = st.number_input("配点 (点)", min_value=0, max_value=50, value=2, step=1, key=f"bulk_p_{target_test_id}")
+            with col_bk4:
+                st.write("")
+                st.write("")
+                if st.button("🔢 まとめて配点を設定", key=f"btn_bulk_pts_{target_test_id}", use_container_width=True):
+                    if bulk_start > bulk_end:
+                        st.error("開始問は終了問以下にしてください。")
+                    else:
+                        for i in range(int(bulk_start), int(bulk_end) + 1):
+                            if i not in special_q_set:
+                                q_k = f'Q{i}'
+                                st.session_state[f"pts_{target_test_id}_{q_k}"] = int(bulk_pts)
+                        st.success(f"問{bulk_start}〜問{bulk_end}を {bulk_pts}点 に設定しました！（最後に下の「一括保存」を押してください）")
+                        st.rerun()
+        
+        current_answers = load_answer_key(target_test_id, t_max_q)
+        current_points = load_points_key(target_test_id, t_max_q)
+        options = list(range(0, NUM_OPTS + 1))
+        new_answers = {}
+        new_points = {}
+
+        col_a_l, col_a_r = st.columns(2)
+        with col_a_l:
+            st.markdown("###### ◀ 問 1 〜 25")
+            for i in range(1, min(26, t_max_q + 1)):
+                q_k = f'Q{i}'
+                curr_ans_val = int(st.session_state.get(f"ans_{target_test_id}_{q_k}", current_answers.get(q_k, 1)))
+                idx = options.index(curr_ans_val) if curr_ans_val in options else 0
+                
+                q_c1, q_c2, q_c3 = st.columns([1, 2, 2])
+                q_c1.write(f"**問 {i}**")
+                new_answers[q_k] = q_c2.selectbox(f"正答_問{i}", options=options, index=idx, key=f"ans_{target_test_id}_{q_k}", label_visibility="collapsed")
+                
+                if i in special_q_set:
+                    q_c3.caption("🔒 特殊ルール対象")
+                    new_points[q_k] = 0
+                else:
+                    init_pt = int(st.session_state.get(f"pts_{target_test_id}_{q_k}", current_points.get(q_k, 2)))
+                    new_points[q_k] = q_c3.number_input(f"配点_問{i}", min_value=0, max_value=50, value=init_pt, step=1, key=f"pts_{target_test_id}_{q_k}", label_visibility="collapsed")
+
+        with col_a_r:
+            if t_max_q >= 26:
+                st.markdown(f"###### ▶ 問 26 〜 {t_max_q}")
+                for i in range(26, t_max_q + 1):
+                    q_k = f'Q{i}'
+                    curr_ans_val = int(st.session_state.get(f"ans_{target_test_id}_{q_k}", current_answers.get(q_k, 1)))
+                    idx = options.index(curr_ans_val) if curr_ans_val in options else 0
+                    
+                    q_c1, q_c2, q_c3 = st.columns([1, 2, 2])
+                    q_c1.write(f"**問 {i}**")
+                    new_answers[q_k] = q_c2.selectbox(f"正答_問{i}", options=options, index=idx, key=f"ans_{target_test_id}_{q_k}", label_visibility="collapsed")
+                    
+                    if i in special_q_set:
+                        q_c3.caption("🔒 特殊ルール対象")
+                        new_points[q_k] = 0
+                    else:
+                        init_pt = int(st.session_state.get(f"pts_{target_test_id}_{q_k}", current_points.get(q_k, 2)))
+                        new_points[q_k] = q_c3.number_input(f"配点_問{i}", min_value=0, max_value=50, value=init_pt, step=1, key=f"pts_{target_test_id}_{q_k}", label_visibility="collapsed")
+
+        calculated_total = sum(new_points.values()) + sum(get_rule_max_points(r) for r in current_rules)
+
+        st.markdown("---")
+        if calculated_total != t_total_score:
+            st.warning(f"⚠️ **配点合計の不一致**: 現在設定されている配点合計は **{calculated_total} 点** です。（目標満点: **{t_total_score} 点**）")
+        else:
+            st.success(f"✅ **配点合計チェックOK**: 設定されている配点合計は **{calculated_total} 点** です。")
+
+        if st.button(f"TEST ID [{target_test_id}] の設定を一括保存する", type="primary", use_container_width=True):
+            if calculated_total != t_total_score:
+                st.error("❌ 配点の合計が目標満点と一致していません。")
+            else:
+                save_answer_key(target_test_id, new_answers)
+                save_points_key(target_test_id, new_points)
+                save_test_config(target_test_id, t_max_q, t_total_score)
+                save_sections_config(target_test_id, new_sections_list)
+                save_special_rules(target_test_id, current_rules)
+                st.session_state[f"force_reload_{target_test_id}"] = True
+                st.success("設定を正常に保存しました！")
+                st.rerun()
