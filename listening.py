@@ -965,7 +965,7 @@ def analyze_mark_sheet(image_file, max_q=50, num_opts=9):
            logs
 
 # ---------------------------------------------------------
-# 模範解答 AI自動読み取り関数（正答情報のみ抽出・高速軽量化版）
+# 模範解答 AI自動読み取り関数（正答情報のみ抽出・高精細＆十分出力枠版）
 # ---------------------------------------------------------
 def analyze_master_answer_sheet_ai(image_file, api_key, max_q_limit=50):
     if not HAS_GENAI:
@@ -978,14 +978,14 @@ def analyze_master_answer_sheet_ai(image_file, api_key, max_q_limit=50):
         pil_img = Image.open(image_file)
         pil_img = ImageOps.exif_transpose(pil_img)
 
-        # 高解像度画像を長辺1600pxに縮小してアップロードとAI解析を高速化
+        # 細かいマーク表の数字も潰れないよう長辺2048pxに調整して高速化
         if pil_img.mode != "RGB":
             pil_img = pil_img.convert("RGB")
-        pil_img.thumbnail((1600, 1600), Image.Resampling.LANCZOS)
+        pil_img.thumbnail((2048, 2048), Image.Resampling.LANCZOS)
 
         model = genai.GenerativeModel(
             'gemini-3.8-flash',
-            generation_config={"temperature": 0.0, "max_output_tokens": 1024}
+            generation_config={"temperature": 0.0, "max_output_tokens": 8192}
         )
 
         prompt = f"""
@@ -1011,12 +1011,19 @@ def analyze_master_answer_sheet_ai(image_file, api_key, max_q_limit=50):
         """
 
         response = model.generate_content([prompt, pil_img])
-        text_resp = response.text.strip()
+        text_resp = (response.text or "").strip()
+        if not text_resp:
+            return None, "AIからの応答が空でした。もう一度ボタンを押して再試行してください。"
 
         if "```json" in text_resp:
             text_resp = text_resp.split("```json")[1].split("```")[0].strip()
         elif "```" in text_resp:
             text_resp = text_resp.split("```")[1].split("```")[0].strip()
+
+        start_idx = text_resp.find("{")
+        end_idx = text_resp.rfind("}")
+        if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
+            text_resp = text_resp[start_idx:end_idx + 1]
 
         extracted_data = json.loads(text_resp)
         raw_answers = extracted_data.get("answers", {})
@@ -1045,7 +1052,7 @@ def analyze_master_answer_sheet_ai(image_file, api_key, max_q_limit=50):
     except Exception as e:
         err_str = str(e)
         if "429" in err_str or "Quota exceeded" in err_str:
-            return None, "⏳ Gemini APIの無料枠上限（1分間に5回まで）に達しました。40秒ほど待ってから、もう一度1回だけボタンを押してください。"
+            return None, "⏳ APIのリクエスト上限に達しました。少し待ってからもう一度お試しください。"
         return None, f"Gemini APIによる解析エラー: {e}"
 
 # --- 設定ロード ---
