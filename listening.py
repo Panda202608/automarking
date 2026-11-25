@@ -978,7 +978,7 @@ def analyze_master_answer_sheet_ai(image_file, api_key, max_q_limit=50):
         pil_img = Image.open(image_file)
         pil_img = ImageOps.exif_transpose(pil_img)
         
-        model = genai.GenerativeModel('gemini-2.5-flash')
+        model = genai.GenerativeModel('gemini-3.8-flash')
         
         prompt = f"""
         添付されたテストの模範解答・解答一覧表の画像を精密に解析し、各解答番号の「正答（正解の選択肢番号）」のみを抽出してJSON形式で出力してください。
