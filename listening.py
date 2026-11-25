@@ -965,7 +965,7 @@ def analyze_mark_sheet(image_file, max_q=50, num_opts=9):
            logs
 
 # ---------------------------------------------------------
-# 模範解答 AI自動読み取り関数（正答情報のみ抽出）
+# 模範解答 AI自動読み取り関数（正答情報のみ抽出・高速軽量化版）
 # ---------------------------------------------------------
 def analyze_master_answer_sheet_ai(image_file, api_key, max_q_limit=50):
     if not HAS_GENAI:
@@ -977,9 +977,17 @@ def analyze_master_answer_sheet_ai(image_file, api_key, max_q_limit=50):
         genai.configure(api_key=api_key)
         pil_img = Image.open(image_file)
         pil_img = ImageOps.exif_transpose(pil_img)
-        
-        model = genai.GenerativeModel('gemini-3.8-flash')
-        
+
+        # 高解像度画像を長辺1600pxに縮小してアップロードとAI解析を高速化
+        if pil_img.mode != "RGB":
+            pil_img = pil_img.convert("RGB")
+        pil_img.thumbnail((1600, 1600), Image.Resampling.LANCZOS)
+
+        model = genai.GenerativeModel(
+            'gemini-3.8-flash',
+            generation_config={"temperature": 0.0, "max_output_tokens": 1024}
+        )
+
         prompt = f"""
         添付されたテストの模範解答・解答一覧表の画像を精密に解析し、各解答番号の「正答（正解の選択肢番号）」のみを抽出してJSON形式で出力してください。
         配点や大問の情報は不要です。正答のみを正確に読み取ってください。
@@ -1004,7 +1012,7 @@ def analyze_master_answer_sheet_ai(image_file, api_key, max_q_limit=50):
 
         response = model.generate_content([prompt, pil_img])
         text_resp = response.text.strip()
-        
+
         if "```json" in text_resp:
             text_resp = text_resp.split("```json")[1].split("```")[0].strip()
         elif "```" in text_resp:
@@ -1035,6 +1043,9 @@ def analyze_master_answer_sheet_ai(image_file, api_key, max_q_limit=50):
         return {"answers": clean_answers}, f"✨ AIによる正答の自動抽出が完了しました（{len(clean_answers)}問分）！下の正答欄を確認し、最後に「一括保存」を押してください。"
 
     except Exception as e:
+        err_str = str(e)
+        if "429" in err_str or "Quota exceeded" in err_str:
+            return None, "⏳ Gemini APIの無料枠上限（1分間に5回まで）に達しました。40秒ほど待ってから、もう一度1回だけボタンを押してください。"
         return None, f"Gemini APIによる解析エラー: {e}"
 
 # --- 設定ロード ---
